@@ -11,53 +11,45 @@ Base = declarative_base()
 
 class User(Base):
     __tablename__ = "users"
-
     id = Column(Integer, primary_key=True, index=True)
     username = Column(String(64), unique=True, index=True, nullable=False)
     display_name = Column(String(128), nullable=False)
+    bio = Column(String(512), nullable=True, default="")
     password_hash = Column(String(256), nullable=False)
     public_key = Column(Text, nullable=False)
     avatar_url = Column(String(512), nullable=True)
     last_seen = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-
     sent_messages = relationship("Message", back_populates="sender", foreign_keys="Message.sender_id")
 
 
 class Chat(Base):
     __tablename__ = "chats"
-
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(128), nullable=True)
     is_group = Column(Boolean, default=False)
+    avatar_url = Column(String(512), nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-
     members = relationship("ChatMember", back_populates="chat", cascade="all, delete-orphan")
     messages = relationship("Message", back_populates="chat", cascade="all, delete-orphan")
 
 
 class ChatMember(Base):
     __tablename__ = "chat_members"
-    __table_args__ = (
-        UniqueConstraint("chat_id", "user_id", name="uq_chat_member"),
-    )
-
+    __table_args__ = (UniqueConstraint("chat_id", "user_id", name="uq_chat_member"),)
     id = Column(Integer, primary_key=True, index=True)
     chat_id = Column(Integer, ForeignKey("chats.id", ondelete="CASCADE"), nullable=False)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     role = Column(String(32), default="member")
+    last_read_id = Column(Integer, default=0)
     joined_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-
     chat = relationship("Chat", back_populates="members")
     user = relationship("User")
 
 
 class Message(Base):
     __tablename__ = "messages"
-    __table_args__ = (
-        Index("ix_messages_chat_created", "chat_id", "created_at"),
-    )
-
+    __table_args__ = (Index("ix_messages_chat_created", "chat_id", "created_at"),)
     id = Column(Integer, primary_key=True, index=True)
     chat_id = Column(Integer, ForeignKey("chats.id", ondelete="CASCADE"), nullable=False)
     sender_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
@@ -67,10 +59,25 @@ class Message(Base):
     message_type = Column(String(32), default="text")
     file_url = Column(String(512), nullable=True)
     file_name = Column(String(256), nullable=True)
+    reply_to_id = Column(Integer, ForeignKey("messages.id", ondelete="SET NULL"), nullable=True)
+    is_edited = Column(Boolean, default=False)
+    is_deleted = Column(Boolean, default=False)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-
     chat = relationship("Chat", back_populates="messages")
     sender = relationship("User", back_populates="sent_messages")
+    reply_to = relationship("Message", remote_side=[id], backref="replies")
+
+
+class Reaction(Base):
+    __tablename__ = "reactions"
+    __table_args__ = (UniqueConstraint("message_id", "user_id", "emoji", name="uq_reaction"),)
+    id = Column(Integer, primary_key=True, index=True)
+    message_id = Column(Integer, ForeignKey("messages.id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    emoji = Column(String(16), nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    message = relationship("Message", backref="reactions")
+    user = relationship("User")
 
 
 Base.metadata.create_all(bind=engine)

@@ -5,3 +5,4 @@ messenger.db
 uploads/
 cloudflared.exe
 *.exe
+tunnel.json
