@@ -1,0 +1,7 @@
+﻿venv/
+__pycache__/
+*.pyc
+messenger.db
+uploads/
+cloudflared.exe
+*.exe

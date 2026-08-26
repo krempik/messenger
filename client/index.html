@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="theme-color" content="#0a0a0f">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="description" content="E2E encrypted messenger by 4ayka Studio">
+    <title>H4ck</title>
+    <link rel="manifest" href="/static/manifest.json">
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+    <link rel="apple-touch-icon" href="/static/icon-192.png">
+</head>
+<body>
+
+<div id="toast-container"></div>
+
+<div id="connection-banner" class="connection-banner hidden">
+    <span>Подключение к серверу...</span>
+</div>
+
+<div id="auth-screen">
+    <div class="auth-container">
+        <div class="auth-logo">
+            <div class="shield">&#128128;</div>
+            <h1>H4ck</h1>
+            <div class="subtitle">4ayka Studio</div>
+            <p>E2E защищённый мессенджер</p>
+        </div>
+        <div class="auth-tabs">
+            <button class="auth-tab active" data-tab="login">Вход</button>
+            <button class="auth-tab" data-tab="register">Регистрация</button>
+        </div>
+        <form id="login-form" class="auth-form active">
+            <div class="form-group">
+                <label>Имя пользователя</label>
+                <input type="text" id="login-username" placeholder="username" autocomplete="username" required>
+            </div>
+            <div class="form-group">
+                <label>Пароль</label>
+                <input type="password" id="login-password" placeholder="&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;" autocomplete="current-password" required>
+            </div>
+            <div class="auth-error" id="login-error"></div>
+            <button type="submit" class="btn-primary">Войти</button>
+        </form>
+        <form id="register-form" class="auth-form">
+            <div class="form-group">
+                <label>Имя пользователя</label>
+                <input type="text" id="reg-username" placeholder="username" autocomplete="username" required pattern="[a-zA-Z0-9_]{3,32}">
+            </div>
+            <div class="form-group">
+                <label>Отображаемое имя</label>
+                <input type="text" id="reg-displayname" placeholder="Ваше имя" required maxlength="128">
+            </div>
+            <div class="form-group">
+                <label>Пароль</label>
+                <input type="password" id="reg-password" placeholder="Минимум 6 символов" autocomplete="new-password" required minlength="6">
+            </div>
+            <div class="auth-error" id="reg-error"></div>
+            <button type="submit" class="btn-primary">Создать аккаунт</button>
+        </form>
+    </div>
+</div>
+
+<div id="app-screen">
+    <div class="sidebar" id="sidebar">
+        <div class="sidebar-header">
+            <div class="sidebar-top">
+                <div>
+                    <h2>H4ck</h2>
+                    <span class="brand-sub">4ayka Studio</span>
+                </div>
+                <div class="sidebar-actions">
+                    <button class="icon-btn" id="new-chat-btn" title="Новый чат">&#9998;</button>
+                </div>
+            </div>
+            <div class="search-box">
+                <span class="search-icon">&#128269;</span>
+                <input type="text" id="search-input" placeholder="Поиск чатов...">
+            </div>
+        </div>
+        <div class="chat-list" id="chat-list"></div>
+        <div class="sidebar-footer">
+            <div class="avatar-wrapper" id="my-avatar-wrapper">
+                <div class="chat-avatar" id="my-avatar">?</div>
+                <div class="avatar-edit-overlay" id="avatar-edit-btn">&#128247;</div>
+                <input type="file" id="avatar-input" accept="image/*" style="display:none">
+            </div>
+            <div class="user-info">
+                <div class="user-name" id="my-name">User</div>
+                <div class="user-status">● В сети</div>
+            </div>
+            <button class="icon-btn" id="host-info-btn" title="Инфо о сервере">&#9741;</button>
+            <button class="icon-btn" id="profile-btn" title="Профиль">&#128100;</button>
+            <button class="btn-logout" id="logout-btn" title="Выйти">&#9211;</button>
+        </div>
+    </div>
+
+    <div class="chat-area hidden" id="chat-area">
+        <div class="chat-header">
+            <button class="back-btn" id="back-btn">&larr;</button>
+            <div class="chat-avatar" id="chat-avatar">?</div>
+            <div class="chat-header-info">
+                <div class="chat-header-name" id="chat-header-name">Chat</div>
+                <div class="chat-header-status" id="chat-header-status">offline</div>
+            </div>
+            <div class="encryption-badge" id="encryption-badge">&#128274; E2E</div>
+            <button class="icon-btn" id="search-chat-btn" title="Поиск">&#128269;</button>
+            <button class="icon-btn" id="chat-menu-btn" title="Настройки чата">&#8942;</button>
+        </div>
+        <div class="chat-search-bar hidden" id="chat-search-bar">
+            <input type="text" id="chat-search-input" placeholder="Поиск в чате...">
+            <button class="icon-btn" id="chat-search-close">&times;</button>
+        </div>
+        <div id="chat-view">
+            <div class="messages-container" id="messages-container"></div>
+            <div class="typing-indicator" id="typing-indicator"></div>
+            <div class="scroll-bottom-btn hidden" id="scroll-bottom-btn">&#8595;</div>
+            <div class="input-area">
+                <div class="input-wrapper">
+                    <div class="input-actions">
+                        <button class="icon-btn" id="attach-btn" title="Файл">&#128206;</button>
+                        <input type="file" id="file-input" style="display:none">
+                    </div>
+                    <textarea id="message-input" rows="1" placeholder="Сообщение..."></textarea>
+                    <button id="send-btn" title="Отправить">&#9654;</button>
+                </div>
+            </div>
+        </div>
+        <div class="empty-state" id="empty-state">
+            <div class="shield">&#128128;</div>
+            <h3>H4ck</h3>
+            <div class="sub">4ayka Studio</div>
+            <p>Выберите чат или начните новый</p>
+        </div>
+    </div>
+</div>
+
+<div class="modal-overlay" id="new-chat-modal">
+    <div class="modal">
+        <h3>Новый чат</h3>
+        <div class="form-group" id="group-name-group" style="display:none; margin-bottom: 16px;">
+            <label>Название группы</label>
+            <input type="text" id="group-name-input" placeholder="Название группы">
+        </div>
+        <div class="user-list" id="user-list"></div>
+        <div class="modal-actions">
+            <button class="btn-cancel" id="modal-cancel">Отмена</button>
+            <button class="btn-primary" id="modal-create">Создать</button>
+        </div>
+    </div>
+</div>
+
+<div class="modal-overlay" id="profile-modal">
+    <div class="modal">
+        <h3>Профиль</h3>
+        <div class="form-group">
+            <label>Отображаемое имя</label>
+            <input type="text" id="profile-displayname" placeholder="Ваше имя" maxlength="128">
+        </div>
+        <div class="form-group">
+            <label>Новый пароль (оставьте пустым чтобы не менять)</label>
+            <input type="password" id="profile-password" placeholder="&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;">
+        </div>
+        <div class="auth-error" id="profile-error"></div>
+        <div class="modal-actions">
+            <button class="btn-cancel" id="profile-cancel">Отмена</button>
+            <button class="btn-primary" id="profile-save">Сохранить</button>
+        </div>
+    </div>
+</div>
+
+<div class="modal-overlay" id="host-info-modal">
+    <div class="modal">
+        <h3>&#9741; Информация о сервере</h3>
+        <div class="host-info-content" id="host-info-content">
+            <div class="host-info-loading">Загрузка...</div>
+        </div>
+        <div class="modal-actions">
+            <button class="btn-cancel" id="host-info-close">Закрыть</button>
+        </div>
+    </div>
+</div>
+
+<div class="modal-overlay" id="chat-menu-modal">
+    <div class="modal" style="width:280px; padding:8px;">
+        <button class="chat-menu-item" id="chat-menu-delete">Удалить чат</button>
+        <button class="chat-menu-item" id="chat-menu-cancel">Отмена</button>
+    </div>
+</div>
+
+<script src="/static/crypto.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>
