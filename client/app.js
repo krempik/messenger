@@ -14,9 +14,25 @@
     let replyToId = null;
     let editingMsgId = null;
     let contextMsgId = null;
+    let forwardMsgId = null;
+    let oldestMsgId = null;
+    let loadingOlder = false;
+    let notifPermission = false;
+    let audioCtx = null;
+    const decryptedMsgCache = {};
 
     const $ = s => document.querySelector(s);
     const $$ = s => document.querySelectorAll(s);
+
+    const EMOJI_DATA = {
+        "Частые": ["😀","😂","😍","🥰","😎","🤔","👍","👎","❤️","🔥","🎉","😢","😡","🥳","💀","👀","✅","❌","⭐","💡","🙏","💪","🤝","😍"],
+        "Смайлики": ["😀","😃","😄","😁","😆","😅","🤣","😂","🙂","😊","😇","🥰","😍","🤩","😘","😗","😋","😛","😜","🤪","😝","🤑","🤗","🤭","🤫","🤔","🤐","🤨","😐","😑","😶","😏","😒","🙄","😬","🤥","😌","😔","😪","🤤","😴","😷","🤒","🤕","🤢","🤮","🥵","🥶","🥴","😵","🤯","🤠","🥳","😎","🤓","🧐"],
+        "Жесты": ["👋","🤚","✋","🖖","👌","🤏","✌️","🤞","🤟","🤘","🤙","👈","👉","👆","👇","☝️","👍","👎","✊","👊","🤛","🤜","👏","🙌","👐","🤲","🤝","🙏"],
+        "Животные": ["🐶","🐱","🐭","🐹","🐰","🦊","🐻","🐼","🐨","🐯","🦁","🐮","🐷","🐸","🐵","🙈","🙉","🙊","🐒","🐔","🐧","🐦","🐤","🦆","🦅","🦉","🦇","🐺","🐗","🐴","🦄","🐝","🐛","🦋","🐌","🐞","🐜"],
+        "Еда": ["🍎","🍐","🍊","🍋","🍌","🍉","🍇","🍓","🫐","🍈","🍒","🍑","🥭","🍍","🥝","🍅","🥑","🍆","🥔","🥕","🌽","🌶️","🥒","🥬","🥦","🧄","🧅","🍄","🥜","🌰","🍞","🥐","🥖","🫓","🥨","🥯","🥞","🧇","🧀","🍖","🍗","🥩","🥓","🍔","🍟","🍕","🌭","🥪","🌮","🌯"],
+        "Объекты": ["⌚","📱","💻","⌨️","🖥️","🖨️","🖱️","🖲️","💾","💿","📀","📷","📸","📹","🎥","📽️","📺","📻","🎙️","🎚️","🎛️","🧭","⏱️","⏰","🔋","🔌","💡","🔦","🕯️","🪙","💰","💵","💳","📦","📫","📬","📭","📮","🗳️","✏️","✒️","🖋️","🖊️","🖌️","📝","📁","📂","📅","📌","📎","🔒","🔓"],
+        "Символы": ["❤️","🧡","💛","💚","💙","💜","🖤","🤍","🤎","💔","❣️","💕","💞","💓","💗","💖","💘","💝","⭐","🌟","💫","✨","🔥","💥","❄️","🌈","☀️","🌤️","⛅","🌥️","☁️","🌧️","⛈️","🌩️","🌪️","🌫️","🌍","🌎","🌏","🎯","🏆","🎮","🎲","🎭","🎨","🎬","🎤","🎧","🎵","🎶","🎹","🥁","🎷","🎺","🎸","🎻"]
+    };
 
     function showChatView() {
         if (isMobile) { $("#sidebar").classList.add("hidden"); $("#chat-view").classList.remove("hidden"); }
@@ -39,7 +55,7 @@
         let h = 0; for (let i = 0; i < (s || "").length; i++) h = s.charCodeAt(i) + ((h << 5) - h);
         return c[Math.abs(h) % c.length];
     }
-    function avatarHtml(user, size) {
+    function avatarHtml(user) {
         if (user?.avatar_url) return `<img src="${esc(user.avatar_url)}" alt="">`;
         return getInitials(user?.display_name || user?.name);
     }
@@ -68,6 +84,29 @@
         return r.json();
     }
 
+    // Notifications
+    function requestNotifPermission() {
+        if (!("Notification" in window)) return;
+        if (Notification.permission === "default") Notification.requestPermission().then(p => { notifPermission = p === "granted"; });
+        else notifPermission = Notification.permission === "granted";
+    }
+    function showNotification(title, body) {
+        if (!notifPermission || document.hasFocus()) return;
+        try { new Notification(title, { body, icon: "/static/favicon.svg" }); } catch {}
+    }
+    function playNotifSound() {
+        try {
+            if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+            o.connect(g); g.connect(audioCtx.destination);
+            o.type = "sine"; o.frequency.setValueAtTime(880, audioCtx.currentTime);
+            o.frequency.exponentialRampToValueAtTime(440, audioCtx.currentTime + 0.15);
+            g.gain.setValueAtTime(0.15, audioCtx.currentTime);
+            g.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.25);
+            o.start(); o.stop(audioCtx.currentTime + 0.25);
+        } catch {}
+    }
+
     // Decryption
     async function decryptMsg(msg) {
         if (msg._decrypted) return msg;
@@ -82,14 +121,23 @@
             ? [msg.sender_encrypted_key, msg.encrypted_key].filter(Boolean)
             : [msg.encrypted_key, msg.sender_encrypted_key].filter(Boolean);
         for (const key of keys) {
-            try {
-                const dec = await CryptoManager.decryptMessage(enc, key, iv);
-                const result = { ...msg, content: dec, _decrypted: true };
-                return result;
-            } catch {}
+            try { return { ...msg, content: await CryptoManager.decryptMessage(enc, key, iv), _decrypted: true }; } catch {}
         }
         return { ...msg, content: "\u{1F512} [Не удалось расшифровать]", _decrypted: true };
     }
+
+    // Theme
+    function initTheme() {
+        const saved = localStorage.getItem("theme") || "dark";
+        if (saved === "light") { document.body.classList.add("light"); $("#theme-toggle-btn").innerHTML = "&#9790;"; }
+        else { document.body.classList.remove("light"); $("#theme-toggle-btn").innerHTML = "&#9788;"; }
+    }
+    $("#theme-toggle-btn").addEventListener("click", () => {
+        const isLight = document.body.classList.toggle("light");
+        localStorage.setItem("theme", isLight ? "light" : "dark");
+        $("#theme-toggle-btn").innerHTML = isLight ? "&#9790;" : "&#9788;";
+    });
+    initTheme();
 
     // Auth tabs
     $$(".auth-tab").forEach(tab => tab.addEventListener("click", () => {
@@ -134,6 +182,7 @@
         localStorage.setItem("token", token);
         localStorage.setItem("user", JSON.stringify(currentUser));
         localStorage.setItem("user_id", String(currentUser.id));
+        requestNotifPermission();
         const storedPub = localStorage.getItem("public_key");
         if (!localStorage.getItem("private_key")) {
             CryptoManager.generateKeyPair().then(kp => { localStorage.setItem("private_key", kp.privateKey); localStorage.setItem("public_key", kp.publicKey); updatePubKey(kp.publicKey); });
@@ -145,15 +194,13 @@
 
     async function updatePubKey(pk) { try { await api("/api/me", { method: "PUT", body: { public_key: pk } }); } catch {} }
 
-    // App Init
     async function startApp() {
         if (!currentUser) { try { currentUser = await api("/api/me"); } catch { logout(); return; } }
         $("#auth-screen").style.display = "none";
         $("#app-screen").classList.remove("hidden");
         $("#my-name").textContent = currentUser.display_name;
         updateMyAvatar();
-        if (!isMobile) { $("#sidebar").classList.remove("hidden"); }
-        else { $("#sidebar").classList.remove("hidden"); }
+        $("#sidebar").classList.remove("hidden");
         connectWebSocket();
         await loadChats();
         if (chatInterval) clearInterval(chatInterval);
@@ -263,6 +310,16 @@
         $("#chat-rename-group").classList.toggle("hidden", !isGroup);
         $("#chat-leave-btn").classList.toggle("hidden", !isGroup);
         if (isGroup) { $("#chat-rename-input").value = chat.name; }
+        if (isGroup) {
+            $("#chat-members-group").classList.remove("hidden");
+            renderMembersList(chat);
+            $("#chat-theme-group").classList.remove("hidden");
+            const current = chat.theme_color || "";
+            $$(".theme-color-btn").forEach(b => b.classList.toggle("active", b.dataset.color === current));
+        } else {
+            $("#chat-members-group").classList.add("hidden");
+            $("#chat-theme-group").classList.add("hidden");
+        }
         openModal("#modal-chat-menu");
     });
     $("#chat-avatar-upload-btn").addEventListener("click", () => $("#chat-avatar-file-input").click());
@@ -285,6 +342,119 @@
         $("#chat-view").classList.add("hidden"); $("#empty-state").style.display = ""; showSidebar();
         try { await api(`/api/chats/${id}`, { method: "DELETE" }); await loadChats(); closeModal(); toast("Чат удалён", "info"); } catch { await loadChats(); }
     });
+
+    // Members list
+    async function renderMembersList(chat) {
+        const list = $("#members-list"); list.innerHTML = "";
+        if (!chat.members) return;
+        const myRole = chat.members.find(m => m.id === currentUser.id)?.role;
+        for (const m of chat.members) {
+            const item = document.createElement("div");
+            item.className = "member-item";
+            const isOwner = m.role === "owner";
+            const isAdmin = m.role === "admin";
+            item.innerHTML = `
+                <div class="member-info">
+                    <div class="chat-avatar" style="width:32px;height:32px;font-size:12px;${m.avatar_url ? "" : "background:" + randomColor(m.display_name)}">${avatarHtml(m)}</div>
+                    <div><div class="member-name">${esc(m.display_name)} ${isOwner ? '<span class="role-badge owner">Владелец</span>' : isAdmin ? '<span class="role-badge admin">Админ</span>' : ''}</div></div>
+                </div>
+                <div class="member-actions">
+                    ${myRole === "owner" && !isOwner ? `<button class="btn-text" onclick="promoteMember(${m.id}, '${m.role === 'admin' ? 'member' : 'admin'}')">${m.role === 'admin' ? 'Понизить' : 'Повысить'}</button>` : ''}
+                    ${myRole === "owner" && !isOwner ? `<button class="btn-text" style="color:var(--danger)" onclick="kickMember(${m.id})">Удалить</button>` : ''}
+                </div>`;
+            list.appendChild(item);
+        }
+    }
+    window.kickMember = async function(userId) {
+        if (!confirm("Удалить участника?")) return;
+        try { await api(`/api/chats/${currentChatId}/members/${userId}`, { method: "DELETE" }); toast("Удалён", "info"); await loadChats(); } catch { toast("Ошибка", "error"); }
+    };
+    window.promoteMember = async function(userId, newRole) {
+        try { await api(`/api/chats/${currentChatId}/members/${userId}`, { method: "PUT", body: { role: newRole } }); toast("Роль обновлена", "success"); await loadChats(); } catch { toast("Ошибка", "error"); }
+    };
+
+    // Chat theme
+    function applyChatTheme(color) {
+        const cv = document.querySelector(".chat-view");
+        if (cv) cv.style.setProperty("--chat-accent", color || "var(--accent)");
+    }
+    $$(".theme-color-btn").forEach(btn => btn.addEventListener("click", async () => {
+        if (!currentChatId) return;
+        const color = btn.dataset.color || null;
+        try { await api(`/api/chats/${currentChatId}`, { method: "PUT", body: { theme_color: color } }); toast("Цвет обновлён", "success"); $$(".theme-color-btn").forEach(b => b.classList.remove("active")); btn.classList.add("active"); applyChatTheme(color); await loadChats(); } catch { toast("Ошибка", "error"); }
+    }));
+
+    // GIF picker
+    let gifSearchTimeout;
+    $("#gif-btn")?.addEventListener("click", e => {
+        e.stopPropagation();
+        $("#sticker-picker").classList.add("hidden");
+        $("#gif-picker").classList.toggle("hidden");
+    });
+    $("#gif-close")?.addEventListener("click", () => $("#gif-picker").classList.add("hidden"));
+    $("#gif-search")?.addEventListener("input", () => {
+        clearTimeout(gifSearchTimeout);
+        gifSearchTimeout = setTimeout(async () => {
+            const q = $("#gif-search").value.trim();
+            if (!q) return;
+            try {
+                const r = await fetch(`https://tenor.googleapis.com/v2/search?q=${encodeURIComponent(q)}&key=AIzaSyAyimkuYQYF_FXVALexPuGQctUWRURdCYQ&limit=20&media_filter=gif,tinygif`);
+                const d = await r.json();
+                const body = $("#gif-picker-body"); body.innerHTML = "";
+                for (const result of d.results || []) {
+                    const img = document.createElement("img");
+                    img.className = "gif-item";
+                    img.src = result.media_formats?.tinygif?.url || result.media_formats?.gif?.url;
+                    img.loading = "lazy";
+                    img.addEventListener("click", async () => {
+                        if (!currentChatId) return;
+                        const gifUrl = result.media_formats?.gif?.url;
+                        try {
+                            ws.send(JSON.stringify({ type: "message", chat_id: currentChatId, content: result.title || "GIF", message_type: "file", file_url: gifUrl, file_name: "gif.gif" }));
+                            $("#gif-picker").classList.add("hidden");
+                            toast("GIF отправлен", "success");
+                        } catch { toast("Ошибка", "error"); }
+                    });
+                    body.appendChild(img);
+                }
+            } catch {}
+        }, 400);
+    });
+
+    // Sticker picker
+    const STICKER_PACKS = {
+        "Коты": ["\u{1F63A}","\u{1F638}","\u{1F639}","\u{1F63B}","\u{1F63C}","\u{1F63D}","\u{1F640}","\u{1F63F}","\u{1F63E}","\u{1F431}","\u{1F408}","\u{1F408}\u200D\u{1F4BB}"],
+        "Животные": ["\u{1F436}","\u{1F98A}","\u{1F43B}","\u{1F43C}","\u{1F428}","\u{1F42F}","\u{1F981}","\u{1F42E}","\u{1F437}","\u{1F438}","\u{1F435}","\u{1F430}"],
+        "Еда": ["\u{1F355}","\u{1F354}","\u{1F35F}","\u{1F32E}","\u{1F32F}","\u{1F363}","\u{1F370}","\u{1F36A}","\u{1F36B}","\u{1F382}","\u2615","\u{1F37A}"],
+        "Спорт": ["\u26BD","\u{1F3C0}","\u{1F3C8}","\u26BE","\u{1F3BE}","\u{1F3D0}","\u{1F3B1}","\u{1F3D3}","\u{1F94A}","\u{1F6B4}","\u{1F3C3}","\u{1F3C4}"],
+        "Эмоции": ["\u{1F602}","\u{1F923}","\u{1F62D}","\u{1F631}","\u{1F914}","\u{1F60E}","\u{1F973}","\u{1F929}","\u{1F480}","\u{1F47B}","\u{1F383}","\u{1F47D}"]
+    };
+    function buildStickerPicker() {
+        const body = $("#sticker-picker-body"); body.innerHTML = "";
+        for (const [cat, stickers] of Object.entries(STICKER_PACKS)) {
+            const catEl = document.createElement("div");
+            catEl.className = "sticker-category"; catEl.textContent = cat;
+            body.appendChild(catEl);
+            for (const s of stickers) {
+                const btn = document.createElement("button");
+                btn.className = "sticker-item"; btn.textContent = s;
+                btn.addEventListener("click", ev => {
+                    ev.stopPropagation();
+                    if (!currentChatId) return;
+                    ws.send(JSON.stringify({ type: "message", chat_id: currentChatId, content: s, message_type: "sticker" }));
+                    $("#sticker-picker").classList.add("hidden");
+                });
+                body.appendChild(btn);
+            }
+        }
+    }
+    $("#sticker-btn")?.addEventListener("click", e => {
+        e.stopPropagation();
+        $("#gif-picker").classList.add("hidden");
+        buildStickerPicker();
+        $("#sticker-picker").classList.toggle("hidden");
+    });
+    $("#sticker-close")?.addEventListener("click", () => $("#sticker-picker").classList.add("hidden"));
 
     // Modals
     function openModal(sel) { $(sel).classList.remove("hidden"); $("#modal-overlay").classList.remove("hidden"); }
@@ -318,13 +488,28 @@
         }, 500);
     });
 
-    // Scroll
+    // Scroll + Pagination
     $("#messages-container")?.addEventListener("scroll", () => {
         const c = $("#messages-container"); if (!c) return;
         const diff = c.scrollHeight - c.scrollTop - c.clientHeight;
         $("#scroll-bottom-btn").classList.toggle("hidden", diff < 200);
+        if (c.scrollTop < 60 && !loadingOlder && oldestMsgId) loadOlderMessages();
     });
     $("#scroll-bottom-btn").addEventListener("click", () => { scrollToBottom(); $("#scroll-bottom-btn").classList.add("hidden"); });
+
+    async function loadOlderMessages() {
+        if (!currentChatId || loadingOlder) return;
+        loadingOlder = true;
+        const container = $("#messages-container");
+        const prevHeight = container.scrollHeight;
+        try {
+            const msgs = await api(`/api/chats/${currentChatId}/messages?before_id=${oldestMsgId}&limit=30`);
+            if (msgs.length === 0) { loadingOlder = false; return; }
+            for (const m of msgs) await appendMessage(m, true);
+            oldestMsgId = msgs[0].id;
+            requestAnimationFrame(() => { container.scrollTop = container.scrollHeight - prevHeight; });
+        } catch {} finally { loadingOlder = false; }
+    }
 
     // WebSocket
     function connectWebSocket() {
@@ -343,6 +528,7 @@
             case "message": onNewMessage(data.message); break;
             case "typing": onTyping(data); break;
             case "read": break;
+            case "read_receipt": onReadReceipt(data); break;
             case "chat_deleted": onChatDeleted(data.chat_id); break;
             case "profile_update": onProfileUpdate(data); break;
             case "presence": loadChats(); break;
@@ -354,9 +540,15 @@
     }
 
     function onNewMessage(msg) {
-        if (String(msg.chat_id) === String(currentChatId)) {
+        const isCurrent = String(msg.chat_id) === String(currentChatId);
+        if (isCurrent) {
             appendMessage(msg, false);
             if (String(msg.sender_id) !== String(currentUser.id)) sendReadReceipt();
+        }
+        if (String(msg.sender_id) !== String(currentUser.id)) {
+            playNotifSound();
+            const chatName = isCurrent ? "" : (chats.find(c => String(c.id) === String(msg.chat_id))?.name || "Чат");
+            showNotification(msg.sender_name || chatName, msg.content || "Файл");
         }
         loadChats();
     }
@@ -366,6 +558,16 @@
             clearTimeout(typingTimeout);
             typingTimeout = setTimeout(() => { if ($("#typing-indicator")) $("#typing-indicator").textContent = ""; }, 3000);
         }
+    }
+    function onReadReceipt(d) {
+        if (String(d.chat_id) !== String(currentChatId)) return;
+        $$(".message-row.own").forEach(row => {
+            const msgId = parseInt(row.dataset.msgId);
+            if (msgId && msgId <= d.last_read_id) {
+                const statusEl = row.querySelector(".msg-status");
+                if (statusEl) statusEl.innerHTML = '<span class="status-read">\u2713\u2713</span>';
+            }
+        });
     }
     function onChatDeleted(id) {
         if (String(id) === String(currentChatId)) {
@@ -408,6 +610,7 @@
             let preview = "";
             if (last) {
                 if (last.is_deleted) preview = "[удалено]";
+                else if (last.message_type === "sticker") preview = "\u{1F4AC} " + (last.content || "Стикер");
                 else if (last.message_type === "file") preview = "\u{1F4CE} " + (last.file_name || "Файл");
                 else if (last.encrypted_key || last.sender_encrypted_key) {
                     const parts = (last.content || "").split(":");
@@ -433,7 +636,7 @@
 
     // Open Chat
     async function openChat(chat) {
-        currentChatId = chat.id;
+        currentChatId = chat.id; oldestMsgId = null;
         $("#empty-state").style.display = "none";
         $("#chat-view").classList.remove("hidden");
         $("#chat-search-bar").classList.add("hidden"); $("#chat-search-input").value = "";
@@ -445,6 +648,7 @@
         if (avUser?.avatar_url) { av.innerHTML = avatarHtml(avUser); av.style.background = "transparent"; }
         else { av.textContent = getInitials(chat.name); av.style.background = randomColor(chat.name); }
         $("#chat-header-name").textContent = chat.name;
+        applyChatTheme(chat.theme_color);
 
         if (chat.other_user) {
             $("#chat-header-status").textContent = chat.other_user.online ? "в сети" : "оффлайн";
@@ -470,13 +674,22 @@
             const msgs = await api(`/api/chats/${currentChatId}/messages`);
             container.innerHTML = "";
             for (const m of msgs) await appendMessage(m, true);
+            if (msgs.length > 0) oldestMsgId = msgs[0].id;
             scrollToBottom();
         } catch { container.innerHTML = '<div class="empty-state"><p>Ошибка загрузки</p></div>'; }
     }
 
     // Messages
+    function getReadStatusHtml(msg, isOwn) {
+        if (!isOwn || !msg.read_by) return "";
+        const others = msg.read_by.filter(r => String(r.user_id) !== String(currentUser.id));
+        if (others.length > 0) return '<span class="msg-status"><span class="status-read">\u2713\u2713</span></span>';
+        return '<span class="msg-status"><span class="status-delivered">\u2713\u2713</span></span>';
+    }
+
     async function appendMessage(msg, isHistory) {
         msg = await decryptMsg(msg);
+        if (msg._decrypted) decryptedMsgCache[msg.id] = msg.content;
         const isOwn = String(msg.sender_id) === String(currentUser.id);
         const row = document.createElement("div");
         row.className = `message-row${isOwn ? " own" : ""}`;
@@ -484,12 +697,20 @@
 
         let replyHtml = "";
         if (msg.reply_to_id && msg.reply_to_content) {
-            replyHtml = `<div class="reply-indicator"><div class="reply-sender">${esc(msg.reply_to_sender || "")}</div><div class="reply-text">${esc(msg.reply_to_content)}</div></div>`;
+            let replyText = msg.reply_to_content;
+            if (decryptedMsgCache[msg.reply_to_id]) {
+                replyText = decryptedMsgCache[msg.reply_to_id];
+            } else if (replyText.includes(":") && replyText.length > 30 && !replyText.includes(" ")) {
+                replyText = "[зашифровано]";
+            }
+            replyHtml = `<div class="reply-indicator"><div class="reply-sender">${esc(msg.reply_to_sender || "")}</div><div class="reply-text">${esc(replyText)}</div></div>`;
         }
 
         let contentHtml = "";
         if (msg.is_deleted) {
             contentHtml = `<div class="message-text" style="color:var(--text-muted);font-style:italic">\u{1F5D1} [удалено]</div>`;
+        } else if (msg.message_type === "sticker") {
+            contentHtml = `<div class="message-text message-sticker">${esc(msg.content)}</div>`;
         } else if (msg.message_type === "file") {
             const fn = msg.file_name || "file", ext = fn.split(".").pop().toLowerCase();
             const isImg = ["jpg","jpeg","png","gif","webp"].includes(ext);
@@ -503,6 +724,7 @@
         }
 
         const editedTag = msg.is_edited && !msg.is_deleted ? '<span class="message-edited">(изменено)</span>' : "";
+        const readStatus = getReadStatusHtml(msg, isOwn);
 
         let reactionsHtml = "";
         if (msg.reactions && msg.reactions.length > 0) {
@@ -513,7 +735,7 @@
             ).join("")}</div>`;
         }
 
-        row.innerHTML = `<div class="message-bubble">${!isOwn ? `<div class="message-sender" data-user-id="${msg.sender_id}">${esc(msg.sender_name)}</div>` : ""}${replyHtml}${contentHtml}${editedTag}<div class="message-time">${formatTime(msg.created_at)}</div>${reactionsHtml}</div>`;
+        row.innerHTML = `<div class="message-bubble">${!isOwn ? `<div class="message-sender" data-user-id="${msg.sender_id}">${esc(msg.sender_name)}</div>` : ""}${replyHtml}${contentHtml}<div class="message-time">${formatTime(msg.created_at)}${readStatus}</div>${reactionsHtml}</div>`;
 
         row.addEventListener("contextmenu", e => showContextMenu(e, msg));
         row.addEventListener("dblclick", e => { e.preventDefault(); showContextMenu(e, msg); });
@@ -544,6 +766,7 @@
         const isOwn = String(msg.sender_id) === String(currentUser.id);
         $("#ctx-edit").style.display = isOwn && !msg.is_deleted ? "flex" : "none";
         $("#ctx-delete").style.display = !msg.is_deleted ? "flex" : "none";
+        $("#ctx-forward").style.display = !msg.is_deleted ? "flex" : "none";
         const menu = $("#context-menu");
         menu.classList.remove("hidden");
         menu.style.left = Math.min(e.clientX || e.pageX, window.innerWidth - 180) + "px";
@@ -552,9 +775,10 @@
 
     document.addEventListener("click", e => {
         if (!e.target.closest("#context-menu")) { $("#context-menu").classList.add("hidden"); }
-        if (!e.target.closest("#reaction-picker") && !e.target.closest("#ctx-react")) {
-            $("#reaction-picker").classList.add("hidden");
-        }
+        if (!e.target.closest("#reaction-picker") && !e.target.closest("#ctx-react")) { $("#reaction-picker").classList.add("hidden"); }
+        if (!e.target.closest("#emoji-picker") && !e.target.closest("#emoji-btn")) { $("#emoji-picker").classList.add("hidden"); }
+        if (!e.target.closest("#gif-picker") && !e.target.closest("#gif-btn")) { $("#gif-picker").classList.add("hidden"); }
+        if (!e.target.closest("#sticker-picker") && !e.target.closest("#sticker-btn")) { $("#sticker-picker").classList.add("hidden"); }
     });
 
     $("#ctx-reply").addEventListener("click", e => {
@@ -562,7 +786,9 @@
         if (!contextMsgId) return;
         const row = document.querySelector(`[data-msg-id="${contextMsgId}"]`);
         const sender = row?.querySelector(".message-sender")?.textContent || "";
-        const text = row?.querySelector(".message-text")?.textContent || "";
+        let text = row?.querySelector(".message-text")?.textContent || "";
+        if (decryptedMsgCache[contextMsgId]) text = decryptedMsgCache[contextMsgId];
+        else if (text.includes(":") && text.length > 30 && !text.includes(" ")) text = "[зашифровано]";
         replyToId = contextMsgId;
         $("#reply-preview-author").textContent = sender;
         $("#reply-preview-text").textContent = text.slice(0, 80);
@@ -606,6 +832,97 @@
         $("#reaction-picker").classList.add("hidden");
         $("#context-menu").classList.add("hidden");
     }));
+
+    // Copy message
+    $("#ctx-copy").addEventListener("click", e => {
+        e.stopPropagation();
+        if (!contextMsgId) return;
+        let text = "";
+        const row = document.querySelector(`[data-msg-id="${contextMsgId}"]`);
+        if (row) text = row.querySelector(".message-text")?.textContent || "";
+        if (decryptedMsgCache[contextMsgId]) text = decryptedMsgCache[contextMsgId];
+        navigator.clipboard.writeText(text).then(() => toast("Скопировано", "success")).catch(() => toast("Ошибка копирования", "error"));
+        $("#context-menu").classList.add("hidden");
+    });
+
+    // Forward
+    $("#ctx-forward").addEventListener("click", e => {
+        e.stopPropagation();
+        if (!contextMsgId) return;
+        forwardMsgId = contextMsgId;
+        $("#context-menu").classList.add("hidden");
+        renderForwardChatList();
+        openModal("#modal-forward");
+    });
+
+    async function renderForwardChatList() {
+        const list = $("#forward-chat-list"); list.innerHTML = '<div class="spinner" style="margin:auto"></div>';
+        try {
+            const allChats = chats.filter(c => String(c.id) !== String(currentChatId));
+            list.innerHTML = "";
+            if (!allChats.length) { list.innerHTML = '<p style="text-align:center;color:var(--text-muted);padding:20px">Нет других чатов</p>'; return; }
+            for (const chat of allChats) {
+                const item = document.createElement("div");
+                item.className = "forward-chat-item";
+                const col = randomColor(chat.name);
+                const avUser = chat.other_user || { display_name: chat.name, avatar_url: chat.avatar_url };
+                item.innerHTML = `<div class="chat-avatar" style="width:40px;height:40px;font-size:14px;${avUser?.avatar_url ? "" : "background:" + col}">${avatarHtml(avUser)}</div><div><div style="font-weight:600;font-size:14px">${esc(chat.name)}</div></div>`;
+                item.addEventListener("click", async () => {
+                    if (!confirm(`Переслать в "${chat.name}"?`)) return;
+                    try { await api(`/api/messages/${forwardMsgId}/forward`, { method: "POST", body: { chat_id: chat.id } }); closeModal(); toast("Переслано", "success"); } catch { toast("Ошибка", "error"); }
+                });
+                list.appendChild(item);
+            }
+        } catch { list.innerHTML = '<p style="text-align:center;color:var(--danger);padding:20px">Ошибка</p>'; }
+    }
+
+    // Emoji Picker
+    let emojiBuilt = false;
+    function buildEmojiPicker() {
+        if (emojiBuilt) return; emojiBuilt = true;
+        const body = $("#emoji-picker-body"); body.innerHTML = "";
+        for (const [cat, emojis] of Object.entries(EMOJI_DATA)) {
+            const catEl = document.createElement("div");
+            catEl.className = "emoji-category"; catEl.textContent = cat;
+            body.appendChild(catEl);
+            for (const e of emojis) {
+                const btn = document.createElement("button");
+                btn.className = "emoji-item"; btn.textContent = e;
+                btn.addEventListener("click", ev => { ev.stopPropagation(); insertEmoji(e); });
+                body.appendChild(btn);
+            }
+        }
+    }
+    function insertEmoji(e) {
+        const input = $("#message-input");
+        const start = input.selectionStart, end = input.selectionEnd;
+        input.value = input.value.slice(0, start) + e + input.value.slice(end);
+        input.selectionStart = input.selectionEnd = start + e.length;
+        input.focus();
+        input.dispatchEvent(new Event("input"));
+    }
+    $("#emoji-btn").addEventListener("click", e => {
+        e.stopPropagation();
+        buildEmojiPicker();
+        const picker = $("#emoji-picker");
+        picker.classList.toggle("hidden");
+    });
+    $("#emoji-search")?.addEventListener("input", () => {
+        const q = $("#emoji-search").value.toLowerCase();
+        $$("#emoji-picker-body .emoji-item").forEach(btn => {
+            const match = btn.textContent.includes(q) || btn.closest(".emoji-category")?.textContent.includes(q);
+            btn.style.display = (!q || match) ? "" : "none";
+        });
+        $$("#emoji-picker-body .emoji-category").forEach(cat => {
+            let next = cat.nextElementSibling;
+            let hasVisible = false;
+            while (next && !next.classList.contains("emoji-category")) {
+                if (next.style.display !== "none") hasVisible = true;
+                next = next.nextElementSibling;
+            }
+            cat.style.display = (!q || hasVisible) ? "" : "none";
+        });
+    });
 
     // Send
     async function sendMessage() {

@@ -6,3 +6,4 @@ uploads/
 cloudflared.exe
 *.exe
 tunnel.json
+*.log

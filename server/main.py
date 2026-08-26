@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 from pydantic import BaseModel
 
-from .database import get_db, User, Chat, ChatMember, Message, Reaction, SessionLocal
+from .database import get_db, User, Chat, ChatMember, Message, Reaction, MessageRead, GroupKey, SessionLocal
 from .auth import hash_password, verify_password, create_access_token, authenticate_ws_token, get_current_user
 from .websocket_manager import manager
 
@@ -117,14 +117,19 @@ class RegisterRequest(BaseModel):
 class LoginRequest(BaseModel):
     username: str; password: str
 class CreateChatRequest(BaseModel):
-    name: Optional[str] = None; member_ids: list[int] = []
+    name: Optional[str] = None; member_ids: list[int] = []; theme_color: Optional[str] = None
 class UpdateProfileRequest(BaseModel):
     display_name: Optional[str] = None; password: Optional[str] = None
     public_key: Optional[str] = None; bio: Optional[str] = None
+class UpdateChatRequest(BaseModel):
+    name: Optional[str] = None
+    theme_color: Optional[str] = None
 class ReactionRequest(BaseModel):
     emoji: str
 class EditMessageRequest(BaseModel):
     content: str; encrypted_key: Optional[str] = None; sender_encrypted_key: Optional[str] = None
+class ForwardMessageRequest(BaseModel):
+    chat_id: int
 
 
 def user_dict(u):
@@ -146,6 +151,8 @@ def message_dict(m, db=None):
     if db:
         reacts = db.query(Reaction).filter(Reaction.message_id == m.id).all()
         d["reactions"] = [{"emoji": r.emoji, "user_id": r.user_id, "user_name": r.user.display_name} for r in reacts]
+        reads = db.query(MessageRead).filter(MessageRead.message_id == m.id).all()
+        d["read_by"] = [{"user_id": r.user_id, "user_name": r.user.display_name, "read_at": r.read_at.isoformat()} for r in reads]
     return d
 
 USERNAME_RE = re.compile(r"^[a-zA-Z0-9_]{3,32}$")
@@ -229,12 +236,12 @@ def create_chat(req: CreateChatRequest, user: User = Depends(get_current_user), 
             .group_by(Chat.id).having(func.count(ChatMember.id) == 2).first())
         if existing: return {"id": existing.id, "name": existing.name or "Chat", "is_group": False}
     is_group = len(member_ids) > 1
-    chat = Chat(name=req.name if is_group else None, is_group=is_group)
+    chat = Chat(name=req.name if is_group else None, is_group=is_group, theme_color=req.theme_color)
     db.add(chat); db.flush()
     db.add(ChatMember(chat_id=chat.id, user_id=user.id, role="owner"))
     for mid in member_ids: db.add(ChatMember(chat_id=chat.id, user_id=mid))
     db.commit(); db.refresh(chat)
-    return {"id": chat.id, "name": chat.name or "Chat", "is_group": is_group}
+    return {"id": chat.id, "name": chat.name or "Chat", "is_group": is_group, "theme_color": chat.theme_color}
 
 @app.post("/api/chats/{chat_id}/avatar")
 async def upload_chat_avatar(chat_id: int, file: UploadFile = File(...),
@@ -257,7 +264,7 @@ async def upload_chat_avatar(chat_id: int, file: UploadFile = File(...),
     return {"avatar_url": chat.avatar_url}
 
 @app.post("/api/chats/{chat_id}/members")
-def add_chat_members(chat_id: int, req: CreateChatRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def add_chat_members(chat_id: int, req: AddMembersRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     member = db.query(ChatMember).filter(ChatMember.chat_id == chat_id, ChatMember.user_id == user.id).first()
     if not member: raise HTTPException(403, "Not a member")
     chat = db.query(Chat).filter(Chat.id == chat_id).first()
@@ -313,18 +320,33 @@ def list_chats(user: User = Depends(get_current_user), db: Session = Depends(get
             display_name = chat.name or ", ".join(u.display_name for _, u in members[:4])
         last_msg = db.query(Message).filter(Message.chat_id == cid).order_by(Message.created_at.desc()).first()
         result.append({"id": chat.id, "name": display_name, "is_group": chat.is_group,
-            "avatar_url": chat.avatar_url, "other_user": other_user,
+            "avatar_url": chat.avatar_url, "theme_color": chat.theme_color, "other_user": other_user,
             "members": [{**user_dict(u), "online": u.id in online_ids, "role": m.role} for m, u in members],
             "unread": unread_map.get(cid, 0),
             "last_message": message_dict(last_msg) if last_msg else None})
     result.sort(key=lambda c: c["last_message"]["created_at"] if c["last_message"] else "", reverse=True)
     return result
 
+@app.get("/api/chats/{chat_id}")
+def get_chat(chat_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    member = db.query(ChatMember).filter(ChatMember.chat_id == chat_id, ChatMember.user_id == user.id).first()
+    if not member: raise HTTPException(403, "Not a member")
+    chat = db.query(Chat).filter(Chat.id == chat_id).first()
+    if not chat: raise HTTPException(404, "Chat not found")
+    members = db.query(ChatMember, User).join(User, User.id == ChatMember.user_id).filter(ChatMember.chat_id == chat_id).all()
+    online_ids = set(manager.get_online_user_ids())
+    return {"id": chat.id, "name": chat.name, "is_group": chat.is_group,
+            "avatar_url": chat.avatar_url, "theme_color": chat.theme_color,
+            "members": [{**user_dict(u), "online": u.id in online_ids, "role": m.role} for m, u in members]}
+
 @app.get("/api/chats/{chat_id}/messages")
-def get_messages(chat_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def get_messages(chat_id: int, before_id: Optional[int] = None, limit: int = 50,
+    user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     if not db.query(ChatMember).filter(ChatMember.chat_id == chat_id, ChatMember.user_id == user.id).first():
         raise HTTPException(403, "Not a member")
-    msgs = db.query(Message).filter(Message.chat_id == chat_id).order_by(Message.created_at.desc()).limit(200).all()
+    q = db.query(Message).filter(Message.chat_id == chat_id)
+    if before_id: q = q.filter(Message.id < before_id)
+    msgs = q.order_by(Message.created_at.desc()).limit(limit).all()
     msgs.reverse()
     return [message_dict(m, db) for m in msgs]
 
@@ -335,7 +357,17 @@ def mark_read(chat_id: int, user: User = Depends(get_current_user), db: Session 
     if not member: raise HTTPException(403, "Not a member")
     max_id = db.query(func.max(Message.id)).filter(Message.chat_id == chat_id).scalar() or 0
     member.last_read_id = max_id
+    unread_msgs = db.query(Message).filter(
+        Message.chat_id == chat_id, Message.sender_id != user.id, Message.id > member.last_read_id
+    ).all()
+    for msg in unread_msgs:
+        existing = db.query(MessageRead).filter(MessageRead.message_id == msg.id, MessageRead.user_id == user.id).first()
+        if not existing:
+            db.add(MessageRead(message_id=msg.id, user_id=user.id))
     db.commit()
+    members = db.query(ChatMember).filter(ChatMember.chat_id == chat_id).all()
+    _fire(manager.send_to_chat([m.user_id for m in members],
+        {"type": "read_receipt", "chat_id": chat_id, "user_id": user.id, "last_read_id": max_id}))
     return {"ok": True}
 
 @app.get("/api/chats/{chat_id}/search")
@@ -349,17 +381,18 @@ def search_messages(chat_id: int, q: str = Query(""), user: User = Depends(get_c
              "created_at": m.created_at.isoformat(), "message_type": m.message_type} for m in msgs]
 
 @app.put("/api/chats/{chat_id}")
-def update_chat(chat_id: int, req: CreateChatRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def update_chat(chat_id: int, req: UpdateChatRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     chat = db.query(Chat).filter(Chat.id == chat_id).first()
     if not chat: raise HTTPException(404, "Chat not found")
     member = db.query(ChatMember).filter(ChatMember.chat_id == chat_id, ChatMember.user_id == user.id).first()
     if not member: raise HTTPException(403, "Not a member")
     if req.name is not None: chat.name = req.name[:128]
+    if req.theme_color is not None: chat.theme_color = req.theme_color[:7] if req.theme_color else None
     db.commit(); db.refresh(chat)
     members = db.query(ChatMember).filter(ChatMember.chat_id == chat_id).all()
     _fire(manager.send_to_chat([m.user_id for m in members],
         {"type": "chat_update", "chat_id": chat_id, "name": chat.name, "avatar_url": chat.avatar_url}))
-    return {"ok": True, "name": chat.name}
+    return {"ok": True, "name": chat.name, "theme_color": chat.theme_color}
 
 @app.delete("/api/chats/{chat_id}")
 def delete_chat(chat_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -376,6 +409,62 @@ def delete_chat(chat_id: int, user: User = Depends(get_current_user), db: Sessio
     db.query(Chat).filter(Chat.id == chat_id).delete()
     db.commit()
     return {"ok": True}
+
+@app.delete("/api/chats/{chat_id}/members/{user_id}")
+def remove_chat_member(chat_id: int, user_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    caller = db.query(ChatMember).filter(ChatMember.chat_id == chat_id, ChatMember.user_id == user.id).first()
+    if not caller or caller.role not in ("owner", "admin"): raise HTTPException(403, "Admin only")
+    target = db.query(ChatMember).filter(ChatMember.chat_id == chat_id, ChatMember.user_id == user_id).first()
+    if not target: raise HTTPException(404, "Member not found")
+    if target.role == "owner": raise HTTPException(403, "Cannot kick owner")
+    db.delete(target); db.commit()
+    chat = db.query(Chat).filter(Chat.id == chat_id).first()
+    members = db.query(ChatMember).filter(ChatMember.chat_id == chat_id).all()
+    _fire(manager.send_to_chat([m.user_id for m in members],
+        {"type": "chat_update", "chat_id": chat_id, "name": chat.name, "avatar_url": chat.avatar_url}))
+    _fire(manager.send_to_chat([user_id], {"type": "chat_deleted", "chat_id": chat_id}))
+    return {"ok": True}
+
+@app.put("/api/chats/{chat_id}/members/{user_id}")
+def update_member_role(chat_id: int, user_id: int, body: dict, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    caller = db.query(ChatMember).filter(ChatMember.chat_id == chat_id, ChatMember.user_id == user.id).first()
+    if not caller or caller.role != "owner": raise HTTPException(403, "Owner only")
+    target = db.query(ChatMember).filter(ChatMember.chat_id == chat_id, ChatMember.user_id == user_id).first()
+    if not target: raise HTTPException(404, "Member not found")
+    new_role = body.get("role", "member")
+    if new_role not in ("member", "admin"): raise HTTPException(400, "Invalid role")
+    target.role = new_role; db.commit()
+    chat = db.query(Chat).filter(Chat.id == chat_id).first()
+    members = db.query(ChatMember).filter(ChatMember.chat_id == chat_id).all()
+    _fire(manager.send_to_chat([m.user_id for m in members],
+        {"type": "chat_update", "chat_id": chat_id, "name": chat.name, "avatar_url": chat.avatar_url}))
+    return {"ok": True, "role": new_role}
+
+class AddMembersRequest(BaseModel):
+    member_ids: list[int] = []
+
+class UploadGroupKeyRequest(BaseModel):
+    encrypted_keys: list
+    key_version: int = 1
+
+@app.post("/api/chats/{chat_id}/group-key")
+def upload_group_key(chat_id: int, req: UploadGroupKeyRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    member = db.query(ChatMember).filter(ChatMember.chat_id == chat_id, ChatMember.user_id == user.id).first()
+    if not member: raise HTTPException(403, "Not a member")
+    for ek in req.encrypted_keys:
+        existing = db.query(GroupKey).filter(GroupKey.chat_id == chat_id, GroupKey.user_id == ek["user_id"]).first()
+        if existing: existing.encrypted_key = ek["encrypted_key"]; existing.key_version = req.key_version
+        else: db.add(GroupKey(chat_id=chat_id, user_id=ek["user_id"], encrypted_key=ek["encrypted_key"], key_version=req.key_version))
+    db.commit()
+    return {"ok": True}
+
+@app.get("/api/chats/{chat_id}/group-key")
+def get_group_key(chat_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    member = db.query(ChatMember).filter(ChatMember.chat_id == chat_id, ChatMember.user_id == user.id).first()
+    if not member: raise HTTPException(403, "Not a member")
+    gk = db.query(GroupKey).filter(GroupKey.chat_id == chat_id, GroupKey.user_id == user.id).order_by(GroupKey.key_version.desc()).first()
+    if not gk: return {"key": None, "key_version": 0}
+    return {"key": gk.encrypted_key, "key_version": gk.key_version}
 
 @app.post("/api/upload")
 async def upload_file(file: UploadFile = File(...), user: User = Depends(get_current_user)):
@@ -433,6 +522,23 @@ def delete_message(message_id: int, user: User = Depends(get_current_user), db: 
     _fire(manager.send_to_chat([m.user_id for m in members],
         {"type": "message_deleted", "message_id": message_id, "chat_id": msg.chat_id}))
     return {"ok": True}
+
+@app.post("/api/messages/{message_id}/forward")
+def forward_message(message_id: int, req: ForwardMessageRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    msg = db.query(Message).filter(Message.id == message_id).first()
+    if not msg: raise HTTPException(404, "Message not found")
+    if not db.query(ChatMember).filter(ChatMember.chat_id == msg.chat_id, ChatMember.user_id == user.id).first():
+        raise HTTPException(403, "Not a member of source chat")
+    if not db.query(ChatMember).filter(ChatMember.chat_id == req.chat_id, ChatMember.user_id == user.id).first():
+        raise HTTPException(403, "Not a member of target chat")
+    fwd = Message(chat_id=req.chat_id, sender_id=user.id, content=msg.content,
+        encrypted_key=msg.encrypted_key, sender_encrypted_key=msg.sender_encrypted_key,
+        message_type=msg.message_type, file_url=msg.file_url, file_name=msg.file_name)
+    db.add(fwd); db.commit(); db.refresh(fwd)
+    members = db.query(ChatMember).filter(ChatMember.chat_id == req.chat_id).all()
+    _fire(manager.send_to_chat([m.user_id for m in members],
+        {"type": "message", "message": message_dict(fwd, db)}))
+    return {"ok": True, "message_id": fwd.id}
 
 app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 

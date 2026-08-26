@@ -29,6 +29,7 @@ class Chat(Base):
     name = Column(String(128), nullable=True)
     is_group = Column(Boolean, default=False)
     avatar_url = Column(String(512), nullable=True)
+    theme_color = Column(String(7), nullable=True, default=None)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     members = relationship("ChatMember", back_populates="chat", cascade="all, delete-orphan")
     messages = relationship("Message", back_populates="chat", cascade="all, delete-orphan")
@@ -78,6 +79,28 @@ class Reaction(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     message = relationship("Message", backref="reactions")
     user = relationship("User")
+
+
+class MessageRead(Base):
+    __tablename__ = "message_reads"
+    __table_args__ = (UniqueConstraint("message_id", "user_id", name="uq_msg_read"),)
+    id = Column(Integer, primary_key=True, index=True)
+    message_id = Column(Integer, ForeignKey("messages.id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    read_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    message = relationship("Message", backref="read_records")
+    user = relationship("User")
+
+
+class GroupKey(Base):
+    __tablename__ = "group_keys"
+    id = Column(Integer, primary_key=True, index=True)
+    chat_id = Column(Integer, ForeignKey("chats.id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    encrypted_key = Column(Text, nullable=False)
+    key_version = Column(Integer, default=1)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    __table_args__ = (UniqueConstraint("chat_id", "user_id", name="uq_group_key"),)
 
 
 Base.metadata.create_all(bind=engine)

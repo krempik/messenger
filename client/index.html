@@ -7,7 +7,7 @@
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="description" content="E2E защищённый мессенджер by 4ayka Studio">
-    <title>H4ck</title>
+    <title>h4ck</title>
     <link rel="manifest" href="/static/manifest.json">
     <link rel="stylesheet" href="/static/style.css">
     <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
@@ -21,7 +21,8 @@
     <div class="auth-container">
         <div class="auth-logo">
             <div class="shield">&#128128;</div>
-            <h1>H4ck</h1>
+            <h1>h4ck</h1>
+            <div class="version-static">v2.2</div>
             <div class="subtitle">4ayka Studio</div>
             <p>E2E защищённый мессенджер</p>
         </div>
@@ -58,9 +59,8 @@
 <div id="app-screen" class="hidden">
     <div class="sidebar" id="sidebar">
         <div class="sidebar-header">
-            <div class="sidebar-version-ticker"><div class="sidebar-version-text">v2.0 | 4ayka Studio</div></div>
             <div class="sidebar-top">
-                <h2>H4ck</h2>
+                <div class="sidebar-brand"><h2>h4ck</h2><div class="version-static">v2.2</div></div>
                 <div class="sidebar-actions"><button class="icon-btn" id="new-chat-btn" title="Новый чат">&#9998;</button></div>
             </div>
             <div class="search-box"><span class="search-icon">&#128269;</span><input type="text" id="search-input" placeholder="Поиск чатов..."></div>
@@ -75,6 +75,7 @@
             <div class="user-info"><div class="user-name" id="my-name">User</div><div class="user-status">&#9679; В сети</div></div>
             <button class="icon-btn" id="host-info-btn" title="Сервер">&#9741;</button>
             <button class="icon-btn" id="profile-btn" title="Профиль">&#128100;</button>
+            <button class="icon-btn" id="theme-toggle-btn" title="Тема">&#9788;</button>
             <button class="btn-logout" id="logout-btn" title="Выйти">&#9211;</button>
         </div>
     </div>
@@ -82,7 +83,7 @@
     <div class="chat-area" id="chat-area">
         <div class="empty-state" id="empty-state">
             <div class="shield">&#128128;</div>
-            <h3>H4ck</h3>
+            <h3>h4ck</h3>
             <div class="sub">4ayka Studio</div>
             <p>Выберите чат или начните новый</p>
         </div>
@@ -130,6 +131,9 @@
             <div class="input-area">
                 <div class="input-wrapper">
                     <button class="icon-btn" id="attach-btn" title="Файл">&#128206;</button>
+                    <button class="icon-btn" id="emoji-btn" title="Эмодзи">&#128578;</button>
+                    <button class="icon-btn" id="sticker-btn" title="Стикеры">&#128172;</button>
+                    <button class="icon-btn" id="gif-btn" title="GIF">&#127916;</button>
                     <input type="file" id="file-input" style="display:none">
                     <textarea id="message-input" rows="1" placeholder="Сообщение..."></textarea>
                     <button id="send-btn" title="Отправить">&#9654;</button>
@@ -189,16 +193,61 @@
         <div class="modal-body">
             <div class="form-group hidden" id="chat-avatar-group"><label>Аватар группы</label><button type="button" id="chat-avatar-upload-btn" class="btn-text">Сменить аватар</button><input type="file" id="chat-avatar-file-input" accept="image/*" style="display:none"></div>
             <div class="form-group hidden" id="chat-rename-group"><label>Название</label><input type="text" id="chat-rename-input" maxlength="128"><button class="btn-primary" id="chat-rename-btn">Сохранить</button></div>
+            <div class="form-group hidden" id="chat-theme-group">
+                <label>Цвет чата</label>
+                <div class="theme-colors" id="theme-colors">
+                    <button class="theme-color-btn" data-color="" style="background:var(--accent)">&#10005;</button>
+                    <button class="theme-color-btn" data-color="#6c5ce7" style="background:#6c5ce7"></button>
+                    <button class="theme-color-btn" data-color="#00b894" style="background:#00b894"></button>
+                    <button class="theme-color-btn" data-color="#e17055" style="background:#e17055"></button>
+                    <button class="theme-color-btn" data-color="#0984e3" style="background:#0984e3"></button>
+                    <button class="theme-color-btn" data-color="#d63031" style="background:#d63031"></button>
+                    <button class="theme-color-btn" data-color="#e84393" style="background:#e84393"></button>
+                    <button class="theme-color-btn" data-color="#00cec9" style="background:#00cec9"></button>
+                    <button class="theme-color-btn" data-color="#fdcb6e" style="background:#fdcb6e"></button>
+                </div>
+            </div>
+            <div class="form-group hidden" id="chat-members-group">
+                <label>Участники</label>
+                <div class="members-list" id="members-list"></div>
+                <button class="btn-text" id="add-member-btn">+ Добавить участника</button>
+            </div>
             <button class="btn-danger hidden" id="chat-leave-btn">Покинуть чат</button>
             <button class="btn-danger" id="chat-delete-btn">Удалить чат</button>
         </div>
     </div>
     <div class="modal-lightbox hidden" id="modal-lightbox"><button class="lightbox-close" id="lightbox-close">&times;</button><img id="lightbox-img" src="" alt=""></div>
+    <div class="modal hidden" id="modal-forward">
+        <div class="modal-header"><h3>&#128228; Переслать</h3><button class="modal-close" data-close-modal>&times;</button></div>
+        <div class="modal-body"><div class="forward-chat-list" id="forward-chat-list"></div></div>
+    </div>
+</div>
+
+<div class="emoji-picker hidden" id="emoji-picker">
+    <div class="emoji-picker-header">
+        <input type="text" id="emoji-search" placeholder="Поиск эмодзи...">
+    </div>
+    <div class="emoji-picker-body" id="emoji-picker-body"></div>
+</div>
+
+<div class="gif-picker hidden" id="gif-picker">
+    <div class="gif-picker-header">
+        <input type="text" id="gif-search" placeholder="Поиск GIF...">
+        <button class="icon-btn" id="gif-close">&times;</button>
+    </div>
+    <div class="gif-picker-body" id="gif-picker-body"></div>
+</div>
+
+<div class="sticker-picker hidden" id="sticker-picker">
+    <div class="sticker-picker-header"><span>Стикеры</span><button class="icon-btn" id="sticker-close">&times;</button></div>
+    <div class="sticker-picker-body" id="sticker-picker-body"></div>
 </div>
 
 <div class="context-menu hidden" id="context-menu">
+    <button class="ctx-item" id="ctx-copy">&#128203; Копировать</button>
     <button class="ctx-item" id="ctx-reply">&#8617; Ответить</button>
     <button class="ctx-item" id="ctx-react">&#128077; Реакция</button>
+    <button class="ctx-item" id="ctx-forward">&#128228; Переслать</button>
     <button class="ctx-item ctx-own" id="ctx-edit" style="display:none">&#9998; Изменить</button>
     <button class="ctx-item ctx-danger" id="ctx-delete">&#128465; Удалить</button>
 </div>
