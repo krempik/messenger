@@ -599,6 +599,71 @@ def get_host_info():
     return {"tunnel_url": TUNNEL_URL, "permanent": bool(_tunnel_config and _tunnel_config.get("tunnel_id")),
             "uptime_seconds": int(time.time() - HOST_START_TIME), "online_users": len(manager.get_online_user_ids())}
 
+
+# ---- ADMIN ----
+
+ADMIN_USERS = {"admin": "admin123"}
+
+def verify_admin(request):
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(status_code=401)
+    token = auth[7:]
+    payload = None
+    try:
+        from .auth import jwt
+        payload = jwt.decode(token, os.getenv("SECRET_KEY", "h4ck-secret-key-change-in-production"), algorithms=["HS256"])
+    except Exception:
+        raise HTTPException(status_code=401)
+    if payload.get("sub") not in ADMIN_USERS:
+        raise HTTPException(status_code=403)
+    return payload
+
+
+class AdminLoginRequest(BaseModel):
+    username: str
+    password: str
+
+@app.post("/api/admin/login")
+def admin_login(req: AdminLoginRequest):
+    if req.username not in ADMIN_USERS or ADMIN_USERS[req.username] != req.password:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    token = create_access_token(req.username)
+    return {"token": token}
+
+@app.get("/api/admin/stats")
+def admin_stats(request, db: Session = Depends(get_db)):
+    verify_admin(request)
+    total_users = db.query(func.count(User.id)).scalar() or 0
+    total_chats = db.query(func.count(Chat.id)).scalar() or 0
+    total_messages = db.query(func.count(Message.id)).scalar() or 0
+    return {"users": total_users, "chats": total_chats, "messages": total_messages, "online": len(manager.get_online_user_ids())}
+
+@app.get("/api/admin/users")
+def admin_users(request, db: Session = Depends(get_db)):
+    verify_admin(request)
+    users = db.query(User).all()
+    return [{"id": u.id, "username": u.username, "bio": getattr(u, 'bio', None),
+             "created_at": u.created_at.isoformat() if hasattr(u, 'created_at') and u.created_at else None} for u in users]
+
+@app.get("/api/admin/chats")
+def admin_chats(request, db: Session = Depends(get_db)):
+    verify_admin(request)
+    chats = db.query(Chat).all()
+    result = []
+    for c in chats:
+        member_count = db.query(func.count(ChatMember.id)).filter(ChatMember.chat_id == c.id).scalar() or 0
+        result.append({"id": c.id, "name": getattr(c, 'name', None), "type": getattr(c, 'type', 'private'),
+                       "member_count": member_count,
+                       "created_at": c.created_at.isoformat() if hasattr(c, 'created_at') and c.created_at else None})
+    return result
+
+@app.get("/api/admin/logs")
+def admin_logs(request, limit: int = 50):
+    verify_admin(request)
+    return [{"time": datetime.now(timezone.utc).isoformat(), "action": "heartbeat", "detail": "admin polling"}]
+
+
 app.mount("/static", StaticFiles(directory=CLIENT_DIR), name="static")
 
 @app.get("/", response_class=HTMLResponse)
