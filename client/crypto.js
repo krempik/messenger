@@ -1,94 +1,109 @@
 const CryptoManager = {
     async generateKeyPair() {
-        const keyPair = await window.crypto.subtle.generateKey(
-            {
-                name: "RSA-OAEP",
-                modulusLength: 2048,
-                publicExponent: new Uint8Array([1, 0, 1]),
-                hash: "SHA-256",
-            },
-            true,
-            ["encrypt", "decrypt"]
-        );
+        try {
+            const keyPair = await window.crypto.subtle.generateKey(
+                {
+                    name: "RSA-OAEP",
+                    modulusLength: 2048,
+                    publicExponent: new Uint8Array([1, 0, 1]),
+                    hash: "SHA-256",
+                },
+                true,
+                ["encrypt", "decrypt"]
+            );
 
-        const pubKey = await window.crypto.subtle.exportKey("spki", keyPair.publicKey);
-        const privKey = await window.crypto.subtle.exportKey("pkcs8", keyPair.privateKey);
+            const pubKey = await window.crypto.subtle.exportKey("spki", keyPair.publicKey);
+            const privKey = await window.crypto.subtle.exportKey("pkcs8", keyPair.privateKey);
 
-        return {
-            publicKey: this.arrayBufferToBase64(pubKey),
-            privateKey: this.arrayBufferToBase64(privKey),
-        };
+            return {
+                publicKey: this.arrayBufferToBase64(pubKey),
+                privateKey: this.arrayBufferToBase64(privKey),
+            };
+        } catch (e) {
+            console.error("Failed to generate key pair:", e);
+            throw new Error("Key generation failed");
+        }
     },
 
     async encryptMessageMulti(plaintext, publicKeys) {
-        const aesKey = await window.crypto.subtle.generateKey(
-            { name: "AES-GCM", length: 256 },
-            true,
-            ["encrypt", "decrypt"]
-        );
+        try {
+            const aesKey = await window.crypto.subtle.generateKey(
+                { name: "AES-GCM", length: 256 },
+                true,
+                ["encrypt", "decrypt"]
+            );
 
-        const iv = window.crypto.getRandomValues(new Uint8Array(12));
-        const encoded = new TextEncoder().encode(plaintext);
+            const iv = window.crypto.getRandomValues(new Uint8Array(12));
+            const encoded = new TextEncoder().encode(plaintext);
 
-        const encryptedContent = await window.crypto.subtle.encrypt(
-            { name: "AES-GCM", iv },
-            aesKey,
-            encoded
-        );
+            const encryptedContent = await window.crypto.subtle.encrypt(
+                { name: "AES-GCM", iv },
+                aesKey,
+                encoded
+            );
 
-        const rawAesKey = await window.crypto.subtle.exportKey("raw", aesKey);
-        const result = {
-            content: this.arrayBufferToBase64(encryptedContent),
-            iv: this.arrayBufferToBase64(iv),
-        };
+            const rawAesKey = await window.crypto.subtle.exportKey("raw", aesKey);
+            const result = {
+                content: this.arrayBufferToBase64(encryptedContent),
+                iv: this.arrayBufferToBase64(iv),
+            };
 
-        for (const [label, pubKeyBase64] of Object.entries(publicKeys)) {
-            if (!pubKeyBase64) continue;
-            try {
-                const pubKey = await this.importPublicKey(pubKeyBase64);
-                const encKey = await window.crypto.subtle.encrypt(
-                    { name: "RSA-OAEP" },
-                    pubKey,
-                    rawAesKey
-                );
-                result[label] = this.arrayBufferToBase64(encKey);
-            } catch (e) {
-                console.error(`Failed to encrypt key for ${label}:`, e);
+            for (const [label, pubKeyBase64] of Object.entries(publicKeys)) {
+                if (!pubKeyBase64) continue;
+                try {
+                    const pubKey = await this.importPublicKey(pubKeyBase64);
+                    const encKey = await window.crypto.subtle.encrypt(
+                        { name: "RSA-OAEP" },
+                        pubKey,
+                        rawAesKey
+                    );
+                    result[label] = this.arrayBufferToBase64(encKey);
+                } catch (e) {
+                    console.error(`Failed to encrypt key for ${label}:`, e);
+                }
             }
-        }
 
-        return result;
+            return result;
+        } catch (e) {
+            console.error("Encryption failed:", e);
+            throw new Error("Encryption failed");
+        }
     },
 
     async decryptMessage(encryptedContentBase64, encryptedKeyBase64, ivBase64) {
-        const privateKey = await this.getPrivateKey();
-        if (!privateKey) throw new Error("No private key");
+        try {
+            const privateKey = await this.getPrivateKey();
+            if (!privateKey) throw new Error("No private key");
 
-        const encryptedAesKey = this.base64ToArrayBuffer(encryptedKeyBase64);
-        const rawAesKey = await window.crypto.subtle.decrypt(
-            { name: "RSA-OAEP" },
-            privateKey,
-            encryptedAesKey
-        );
+            const encryptedAesKey = this.base64ToArrayBuffer(encryptedKeyBase64);
+            const rawAesKey = await window.crypto.subtle.decrypt(
+                { name: "RSA-OAEP" },
+                privateKey,
+                encryptedAesKey
+            );
 
-        const aesKey = await window.crypto.subtle.importKey(
-            "raw",
-            rawAesKey,
-            { name: "AES-GCM", length: 256 },
-            false,
-            ["decrypt"]
-        );
+            const aesKey = await window.crypto.subtle.importKey(
+                "raw",
+                rawAesKey,
+                { name: "AES-GCM", length: 256 },
+                false,
+                ["decrypt"]
+            );
 
-        const iv = this.base64ToArrayBuffer(ivBase64);
-        const encryptedContent = this.base64ToArrayBuffer(encryptedContentBase64);
+            const iv = this.base64ToArrayBuffer(ivBase64);
+            const encryptedContent = this.base64ToArrayBuffer(encryptedContentBase64);
 
-        const decrypted = await window.crypto.subtle.decrypt(
-            { name: "AES-GCM", iv },
-            aesKey,
-            encryptedContent
-        );
+            const decrypted = await window.crypto.subtle.decrypt(
+                { name: "AES-GCM", iv },
+                aesKey,
+                encryptedContent
+            );
 
-        return new TextDecoder().decode(decrypted);
+            return new TextDecoder().decode(decrypted);
+        } catch (e) {
+            console.error("Decryption failed:", e);
+            throw new Error("Decryption failed");
+        }
     },
 
     async importPublicKey(base64Key) {
@@ -115,6 +130,7 @@ const CryptoManager = {
                 ["decrypt"]
             );
         } catch (e) {
+            console.error("Failed to import private key:", e);
             return null;
         }
     },

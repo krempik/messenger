@@ -1,11 +1,14 @@
 from fastapi import WebSocket
 from typing import Dict, Set
 import json
+import asyncio
+import time
 
 
 class ConnectionManager:
     def __init__(self):
         self.active_connections: Dict[int, Set[WebSocket]] = {}
+        self._cleanup_task: asyncio.Task | None = None
 
     async def connect(self, websocket: WebSocket, user_id: int):
         await websocket.accept()
@@ -35,6 +38,8 @@ class ConnectionManager:
             except Exception:
                 dead.add(ws)
         self.active_connections[user_id] -= dead
+        if not self.active_connections[user_id]:
+            del self.active_connections[user_id]
 
     async def send_to_chat(self, member_ids: list[int], data: dict, exclude_user: int = None):
         for uid in member_ids:
@@ -44,6 +49,21 @@ class ConnectionManager:
     async def broadcast(self, data: dict):
         for uid in list(self.active_connections.keys()):
             await self.send_to_user(uid, data)
+
+    async def _cleanup_stale_connections(self):
+        while True:
+            await asyncio.sleep(30)
+            now = time.time()
+            for user_id, connections in list(self.active_connections.items()):
+                dead = set()
+                for ws in connections:
+                    try:
+                        await ws.send_text(json.dumps({"type": "ping"}))
+                    except Exception:
+                        dead.add(ws)
+                self.active_connections[user_id] -= dead
+                if not self.active_connections[user_id]:
+                    del self.active_connections[user_id]
 
 
 manager = ConnectionManager()

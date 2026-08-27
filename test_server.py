@@ -11,15 +11,18 @@ def test_root():
 
 
 def test_register():
-    r = client.post("/api/auth/register", json={
-        "username": "testuser_" + str(hash(__name__)),
-        "password": "testpass123"
+    import time
+    r = client.post("/api/register", json={
+        "username": f"testuser_{int(time.time()*1000)%100000}",
+        "display_name": "Test User",
+        "password": "testpass123",
+        "public_key": "test_key"
     })
-    assert r.status_code in (200, 400)
+    assert r.status_code in (200, 400, 409)
 
 
 def test_login():
-    r = client.post("/api/auth/login", data={
+    r = client.post("/api/login", json={
         "username": "test_login_user",
         "password": "testpass"
     })

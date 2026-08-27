@@ -20,9 +20,19 @@
     let notifPermission = false;
     let audioCtx = null;
     const decryptedMsgCache = {};
+    const MAX_CACHE_SIZE = 500;
 
     const $ = s => document.querySelector(s);
     const $$ = s => document.querySelectorAll(s);
+
+    function pruneCache() {
+        if (Object.keys(decryptedMsgCache).length > MAX_CACHE_SIZE) {
+            const keys = Object.keys(decryptedMsgCache);
+            for (let i = 0; i < keys.length / 2; i++) {
+                delete decryptedMsgCache[keys[i]];
+            }
+        }
+    }
 
     const EMOJI_DATA = {
         "Частые": ["😀","😂","😍","🥰","😎","🤔","👍","👎","❤️","🔥","🎉","😢","😡","🥳","💀","👀","✅","❌","⭐","💡","🙏","💪","🤝","😍"],
@@ -123,6 +133,7 @@
         for (const key of keys) {
             try { return { ...msg, content: await CryptoManager.decryptMessage(enc, key, iv), _decrypted: true }; } catch {}
         }
+        pruneCache();
         return { ...msg, content: "\u{1F512} [Не удалось расшифровать]", _decrypted: true };
     }
 
@@ -201,6 +212,18 @@
         $("#my-name").textContent = currentUser.display_name;
         updateMyAvatar();
         $("#sidebar").classList.remove("hidden");
+        
+        // Show admin button for kremp
+        if (currentUser.username === "kremp") {
+            $("#admin-btn").classList.remove("hidden");
+        }
+        
+        // Fetch and display version
+        try {
+            const v = await api("/api/version");
+            document.querySelectorAll(".version-static").forEach(el => el.textContent = "v" + v.version);
+        } catch {}
+        
         connectWebSocket();
         await loadChats();
         if (chatInterval) clearInterval(chatInterval);
@@ -300,6 +323,62 @@
         } catch { c.innerHTML = "<p>Ошибка</p>"; }
     });
 
+    // Admin Panel
+    $("#admin-btn").addEventListener("click", async () => {
+        const c = $("#admin-content"); c.innerHTML = '<div class="spinner"></div>';
+        openModal("#modal-admin");
+        try {
+            const [stats, users, chats] = await Promise.all([
+                api("/api/admin/stats"),
+                api("/api/admin/users"),
+                api("/api/admin/chats")
+            ]);
+            c.innerHTML = `
+                <div class="admin-section">
+                    <h4>&#128202; Статистика</h4>
+                    <div class="stats-grid">
+                        <div class="stat-item"><span class="stat-val">${stats.users}</span><span class="stat-lbl">Пользователей</span></div>
+                        <div class="stat-item"><span class="stat-val">${stats.chats}</span><span class="stat-lbl">Чатов</span></div>
+                        <div class="stat-item"><span class="stat-val">${stats.messages}</span><span class="stat-lbl">Сообщений</span></div>
+                        <div class="stat-item"><span class="stat-val">${stats.online}</span><span class="stat-lbl">Онлайн</span></div>
+                    </div>
+                </div>
+                <div class="admin-section">
+                    <h4>&#128100; Пользователи (${users.length})</h4>
+                    <div class="admin-table">
+                        <div class="admin-row header"><span>ID</span><span>Username</span><span>Name</span><span>Bio</span><span>Created</span><span>Action</span></div>
+                        ${users.map(u => `
+                            <div class="admin-row">
+                                <span>${u.id}</span>
+                                <span>${esc(u.username)}</span>
+                                <span>${esc(u.display_name)}</span>
+                                <span>${esc(u.bio || "-")}</span>
+                                <span>${u.created_at ? new Date(u.created_at).toLocaleString() : "-"}</span>
+                                <span><button class="btn-text" onclick="adminDeleteUser(${u.id})">&#128465;</button></span>
+                            </div>
+                        `).join("")}
+                    </div>
+                </div>
+                <div class="admin-section">
+                    <h4>&#128172; Чаты (${chats.length})</h4>
+                    <div class="admin-table">
+                        <div class="admin-row header"><span>ID</span><span>Name</span><span>Type</span><span>Members</span><span>Created</span><span>Action</span></div>
+                        ${chats.map(c => `
+                            <div class="admin-row">
+                                <span>${c.id}</span>
+                                <span>${esc(c.name || "-")}</span>
+                                <span>${c.is_group ? "Группа" : "ЛС"}</span>
+                                <span>${c.member_count}</span>
+                                <span>${c.created_at ? new Date(c.created_at).toLocaleString() : "-"}</span>
+                                <span><button class="btn-text" onclick="adminDeleteChat(${c.id})">&#128465;</button></span>
+                            </div>
+                        `).join("")}
+                    </div>
+                </div>
+            `;
+        } catch { c.innerHTML = "<p>Ошибка загрузки</p>"; }
+    });
+
     // Chat Menu
     $("#chat-menu-btn").addEventListener("click", () => {
         if (!currentChatId) return;
@@ -373,6 +452,15 @@
         try { await api(`/api/chats/${currentChatId}/members/${userId}`, { method: "PUT", body: { role: newRole } }); toast("Роль обновлена", "success"); await loadChats(); } catch { toast("Ошибка", "error"); }
     };
 
+    window.adminDeleteUser = async function(userId) {
+        if (!confirm("Удалить пользователя?")) return;
+        try { await api(`/api/admin/users/${userId}`, { method: "DELETE" }); toast("Пользователь удалён", "success"); $("#admin-btn").click(); } catch { toast("Ошибка", "error"); }
+    };
+    window.adminDeleteChat = async function(chatId) {
+        if (!confirm("Удалить чат?")) return;
+        try { await api(`/api/admin/chats/${chatId}`, { method: "DELETE" }); toast("Чат удалён", "success"); $("#admin-btn").click(); } catch { toast("Ошибка", "error"); }
+    };
+
     // Chat theme
     function applyChatTheme(color) {
         const cv = document.querySelector(".chat-view");
@@ -386,6 +474,8 @@
 
     // GIF picker
     let gifSearchTimeout;
+    let tenorApiKey = "";
+
     $("#gif-btn")?.addEventListener("click", e => {
         e.stopPropagation();
         $("#sticker-picker").classList.add("hidden");
@@ -397,8 +487,9 @@
         gifSearchTimeout = setTimeout(async () => {
             const q = $("#gif-search").value.trim();
             if (!q) return;
+            const apiKey = tenorApiKey || "LIVDSRZULELA"; // Demo key - replace with your own
             try {
-                const r = await fetch(`https://tenor.googleapis.com/v2/search?q=${encodeURIComponent(q)}&key=AIzaSyAyimkuYQYF_FXVALexPuGQctUWRURdCYQ&limit=20&media_filter=gif,tinygif`);
+                const r = await fetch(`https://tenor.googleapis.com/v2/search?q=${encodeURIComponent(q)}&key=${apiKey}&limit=20&media_filter=gif,tinygif`);
                 const d = await r.json();
                 const body = $("#gif-picker-body"); body.innerHTML = "";
                 for (const result of d.results || []) {
@@ -410,7 +501,10 @@
                         if (!currentChatId) return;
                         const gifUrl = result.media_formats?.gif?.url;
                         try {
-                            ws.send(JSON.stringify({ type: "message", chat_id: currentChatId, content: result.title || "GIF", message_type: "file", file_url: gifUrl, file_name: "gif.gif" }));
+                            await api(`/api/chats/${currentChatId}/messages`, {
+                                method: "POST",
+                                body: { content: result.title || "GIF", message_type: "file", file_url: gifUrl, file_name: "gif.gif" }
+                            });
                             $("#gif-picker").classList.add("hidden");
                             toast("GIF отправлен", "success");
                         } catch { toast("Ошибка", "error"); }

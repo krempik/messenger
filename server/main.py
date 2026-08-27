@@ -1,19 +1,35 @@
-import os, re, json, uuid, subprocess, threading, time, asyncio
+import os
+import re
+import json
+import uuid
+import subprocess
+import threading
+import time
+import asyncio
 from typing import Optional
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 
-from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect, UploadFile, File, Query
+from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect, UploadFile, File, Query, Request, status
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import func
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
-from .database import get_db, User, Chat, ChatMember, Message, Reaction, MessageRead, GroupKey, SessionLocal
-from .auth import hash_password, verify_password, create_access_token, authenticate_ws_token, get_current_user
+from .database import get_db, User, Chat, ChatMember, Message, Reaction, MessageRead, GroupKey, SessionLocal, PushSubscription, Block, ModLog, StickerPack, Sticker, LinkPreview
+from .auth import hash_password, verify_password, create_access_token, authenticate_ws_token, get_current_user, SECRET_KEY, get_vapid_keys
 from .websocket_manager import manager
+
+BASE_DIR = Path(__file__).parent.parent
+VERSION_FILE = BASE_DIR / "VERSION"
+def get_version():
+    try:
+        return VERSION_FILE.read_text().strip()
+    except Exception:
+        return "2.2.1"
 
 _loop: Optional[asyncio.AbstractEventLoop] = None
 
@@ -31,14 +47,41 @@ MAX_FILE_SIZE = 100 * 1024 * 1024
 ALLOWED_AVATAR_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 UNSAFE_UPLOAD_EXTS = {".html", ".htm", ".svg", ".xhtml", ".php", ".jsp"}
 
+_rate_limit_store: dict[str, list[float]] = {}
+_RATE_LIMIT_WINDOW = 60
+_RATE_LIMIT_MAX_REQUESTS = 120
+
+
+def _check_rate_limit(client_ip: str) -> bool:
+    now = time.time()
+    window_start = now - _RATE_LIMIT_WINDOW
+    if client_ip not in _rate_limit_store:
+        _rate_limit_store[client_ip] = []
+    requests = _rate_limit_store[client_ip]
+    while requests and requests[0] < window_start:
+        requests.pop(0)
+    if len(requests) >= _RATE_LIMIT_MAX_REQUESTS:
+        return False
+    requests.append(now)
+    return True
+
+
+def _get_client_ip(request: Request) -> str:
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
 
 def _find_cloudflared():
     path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "cloudflared.exe")
-    if os.path.isfile(path): return path
+    if os.path.isfile(path):
+        return path
     for p in ["cloudflared.exe", "cloudflared"]:
         for d in os.environ.get("PATH", "").split(os.pathsep):
             full = os.path.join(d, p)
-            if os.path.isfile(full): return full
+            if os.path.isfile(full):
+                return full
     return None
 
 
@@ -46,15 +89,19 @@ def _load_tunnel_config():
     p = os.path.join(os.path.dirname(os.path.dirname(__file__)), "tunnel.json")
     if os.path.isfile(p):
         try:
-            with open(p) as f: return json.load(f)
-        except Exception: pass
+            with open(p) as f:
+                return json.load(f)
+        except Exception:
+            pass
     return None
 
 
 def _start_tunnel():
     global _tunnel_process, TUNNEL_URL, _tunnel_config
     cf = _find_cloudflared()
-    if not cf: print("[!] cloudflared not found"); return
+    if not cf:
+        print("[!] cloudflared not found")
+        return
     _tunnel_config = _load_tunnel_config()
     named = _tunnel_config and _tunnel_config.get("tunnel_id")
     try:
@@ -71,7 +118,8 @@ def _start_tunnel():
             pat = re.compile(r"https://(?!api\.)[a-z0-9\-]+\.trycloudflare\.com")
             for line in iter(_tunnel_process.stdout.readline, b""):
                 t = line.decode("utf-8", errors="replace").rstrip()
-                if t: print(f"[tunnel] {t}")
+                if t:
+                    print(f"[tunnel] {t}")
                 if named and _tunnel_config.get("domain"):
                     TUNNEL_URL = f"https://{_tunnel_config['domain']}"
                     if "Connection registered" in t or "INF" in t:
@@ -82,16 +130,21 @@ def _start_tunnel():
                         TUNNEL_URL = m.group(0)
                         print(f"\n{'='*50}\n  PUBLIC URL: {TUNNEL_URL}\n{'='*50}\n")
         threading.Thread(target=_reader, daemon=True).start()
-    except Exception as e: print(f"[!] cloudflared failed: {e}")
+    except Exception as e:
+        print(f"[!] cloudflared failed: {e}")
 
 
 def _stop_tunnel():
     global _tunnel_process
     if _tunnel_process:
-        try: _tunnel_process.terminate(); _tunnel_process.wait(timeout=3)
+        try:
+            _tunnel_process.terminate()
+            _tunnel_process.wait(timeout=3)
         except Exception:
-            try: _tunnel_process.kill()
-            except: pass
+            try:
+                _tunnel_process.kill()
+            except Exception:
+                pass
         _tunnel_process = None
 
 
@@ -100,8 +153,16 @@ async def lifespan(app: FastAPI):
     global _loop
     _loop = asyncio.get_event_loop()
     _start_tunnel()
+    # Start WebSocket cleanup task
+    manager._cleanup_task = asyncio.create_task(manager._cleanup_stale_connections())
     print("[*] H4ck Messenger started on http://localhost:8000")
     yield
+    if manager._cleanup_task:
+        manager._cleanup_task.cancel()
+        try:
+            await manager._cleanup_task
+        except asyncio.CancelledError:
+            pass
     _stop_tunnel()
 
 app = FastAPI(title="H4ck Messenger", lifespan=lifespan)
@@ -110,6 +171,21 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, 
 UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 CLIENT_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "client")
+
+
+@app.get("/api/version")
+def get_version_endpoint():
+    return {"version": get_version()}
+
+
+@app.middleware("http")
+async def rate_limit_middleware(request: Request, call_next):
+    if request.url.path.startswith("/api/") and not request.url.path.startswith("/api/admin/"):
+        client_ip = _get_client_ip(request)
+        if not _check_rate_limit(client_ip):
+            raise HTTPException(status_code=429, detail="Rate limit exceeded")
+    response = await call_next(request)
+    return response
 
 
 class RegisterRequest(BaseModel):
@@ -173,7 +249,31 @@ def register(req: RegisterRequest, db: Session = Depends(get_db)):
 def login(req: LoginRequest, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.username == req.username).first()
     if not user or not verify_password(req.password, user.password_hash): raise HTTPException(401, "Invalid credentials")
-    return {"token": create_access_token(user.id), "user": user_dict(user)}
+    return {
+        "token": create_access_token(user.id),
+        "refresh_token": create_refresh_token(user.id),
+        "user": user_dict(user)
+    }
+
+
+@app.post("/api/refresh")
+def refresh_token(req: dict, db: Session = Depends(get_db)):
+    refresh = req.get("refresh_token")
+    if not refresh:
+        raise HTTPException(400, "Refresh token required")
+    payload = decode_refresh_token(refresh)
+    if not payload:
+        raise HTTPException(401, "Invalid or expired refresh token")
+    user_id = int(payload["sub"])
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(401, "User not found")
+    return {
+        "token": create_access_token(user.id),
+        "refresh_token": create_refresh_token(user.id),
+        "user": user_dict(user)
+    }
+
 
 @app.get("/api/me")
 def get_me(user: User = Depends(get_current_user)): return user_dict(user)
@@ -262,6 +362,15 @@ async def upload_chat_avatar(chat_id: int, file: UploadFile = File(...),
     _fire(manager.send_to_chat([m.user_id for m in members],
         {"type": "chat_update", "chat_id": chat_id, "avatar_url": chat.avatar_url, "name": chat.name}))
     return {"avatar_url": chat.avatar_url}
+
+class AddMembersRequest(BaseModel):
+    member_ids: list[int] = []
+
+
+class UploadGroupKeyRequest(BaseModel):
+    encrypted_keys: list
+    key_version: int = 1
+
 
 @app.post("/api/chats/{chat_id}/members")
 def add_chat_members(chat_id: int, req: AddMembersRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -440,18 +549,16 @@ def update_member_role(chat_id: int, user_id: int, body: dict, user: User = Depe
         {"type": "chat_update", "chat_id": chat_id, "name": chat.name, "avatar_url": chat.avatar_url}))
     return {"ok": True, "role": new_role}
 
-class AddMembersRequest(BaseModel):
-    member_ids: list[int] = []
-
-class UploadGroupKeyRequest(BaseModel):
-    encrypted_keys: list
-    key_version: int = 1
 
 @app.post("/api/chats/{chat_id}/group-key")
 def upload_group_key(chat_id: int, req: UploadGroupKeyRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     member = db.query(ChatMember).filter(ChatMember.chat_id == chat_id, ChatMember.user_id == user.id).first()
     if not member: raise HTTPException(403, "Not a member")
+    if not isinstance(req.encrypted_keys, list):
+        raise HTTPException(400, "encrypted_keys must be a list")
     for ek in req.encrypted_keys:
+        if not isinstance(ek, dict) or "user_id" not in ek or "encrypted_key" not in ek:
+            raise HTTPException(400, "Invalid encrypted_key format")
         existing = db.query(GroupKey).filter(GroupKey.chat_id == chat_id, GroupKey.user_id == ek["user_id"]).first()
         if existing: existing.encrypted_key = ek["encrypted_key"]; existing.key_version = req.key_version
         else: db.add(GroupKey(chat_id=chat_id, user_id=ek["user_id"], encrypted_key=ek["encrypted_key"], key_version=req.key_version))
@@ -580,8 +687,10 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                     members = db.query(ChatMember).filter(ChatMember.chat_id == chat_id).all()
                     await manager.send_to_chat([m.user_id for m in members],
                         {"type": "read", "chat_id": chat_id, "user_id": user.id}, exclude_user=user.id)
-        except WebSocketDisconnect: pass
-        except: pass
+        except WebSocketDisconnect:
+            pass
+        except Exception as e:
+            print(f"[WS Error] {e}")
         finally:
             manager.disconnect(websocket, user.id)
             user.last_seen = datetime.now(timezone.utc); db.commit()
@@ -602,69 +711,492 @@ def get_host_info():
 
 # ---- ADMIN ----
 
-ADMIN_USERS = {"admin": "admin123"}
+from .auth import decode_token
 
-def verify_admin(request):
+
+def verify_admin(request: Request, db: Session = Depends(get_db)) -> User:
     auth = request.headers.get("Authorization", "")
     if not auth.startswith("Bearer "):
         raise HTTPException(status_code=401)
     token = auth[7:]
-    payload = None
-    try:
-        from .auth import jwt
-        payload = jwt.decode(token, os.getenv("SECRET_KEY", "h4ck-secret-key-change-in-production"), algorithms=["HS256"])
-    except Exception:
+    payload = decode_token(token)
+    if not payload:
         raise HTTPException(status_code=401)
-    if payload.get("sub") not in ADMIN_USERS:
+    admin_user = db.query(User).filter(User.id == int(payload["sub"])).first()
+    if not admin_user or not admin_user.is_admin:
         raise HTTPException(status_code=403)
-    return payload
+    return admin_user
 
 
 class AdminLoginRequest(BaseModel):
     username: str
     password: str
 
+
 @app.post("/api/admin/login")
-def admin_login(req: AdminLoginRequest):
-    if req.username not in ADMIN_USERS or ADMIN_USERS[req.username] != req.password:
+def admin_login(req: AdminLoginRequest, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.username == req.username).first()
+    if not user or not user.is_admin or not verify_password(req.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid credentials")
-    token = create_access_token(req.username)
+    token = create_access_token(user.id)
     return {"token": token}
 
+
 @app.get("/api/admin/stats")
-def admin_stats(request, db: Session = Depends(get_db)):
-    verify_admin(request)
+def admin_stats(admin_user: User = Depends(verify_admin), db: Session = Depends(get_db)):
     total_users = db.query(func.count(User.id)).scalar() or 0
     total_chats = db.query(func.count(Chat.id)).scalar() or 0
     total_messages = db.query(func.count(Message.id)).scalar() or 0
     return {"users": total_users, "chats": total_chats, "messages": total_messages, "online": len(manager.get_online_user_ids())}
 
+
 @app.get("/api/admin/users")
-def admin_users(request, db: Session = Depends(get_db)):
-    verify_admin(request)
+def admin_users(admin_user: User = Depends(verify_admin), db: Session = Depends(get_db)):
     users = db.query(User).all()
-    return [{"id": u.id, "username": u.username, "bio": getattr(u, 'bio', None),
-             "created_at": u.created_at.isoformat() if hasattr(u, 'created_at') and u.created_at else None} for u in users]
+    return [{"id": u.id, "username": u.username, "bio": u.bio,
+             "created_at": u.created_at.isoformat() if u.created_at else None} for u in users]
+
 
 @app.get("/api/admin/chats")
-def admin_chats(request, db: Session = Depends(get_db)):
-    verify_admin(request)
+def admin_chats(admin_user: User = Depends(verify_admin), db: Session = Depends(get_db)):
     chats = db.query(Chat).all()
     result = []
     for c in chats:
         member_count = db.query(func.count(ChatMember.id)).filter(ChatMember.chat_id == c.id).scalar() or 0
-        result.append({"id": c.id, "name": getattr(c, 'name', None), "type": getattr(c, 'type', 'private'),
+        result.append({"id": c.id, "name": c.name, "is_group": c.is_group,
                        "member_count": member_count,
-                       "created_at": c.created_at.isoformat() if hasattr(c, 'created_at') and c.created_at else None})
+                       "created_at": c.created_at.isoformat() if c.created_at else None})
     return result
 
+
 @app.get("/api/admin/logs")
-def admin_logs(request, limit: int = 50):
-    verify_admin(request)
+def admin_logs(admin_user: User = Depends(verify_admin), limit: int = 50):
     return [{"time": datetime.now(timezone.utc).isoformat(), "action": "heartbeat", "detail": "admin polling"}]
 
 
+@app.delete("/api/admin/users/{user_id}")
+def admin_delete_user(user_id: int, admin_user: User = Depends(verify_admin), db: Session = Depends(get_db)):
+    if user_id == admin_user.id:
+        raise HTTPException(403, "Cannot delete yourself")
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(404, "User not found")
+    db.delete(user)
+    db.commit()
+    return {"ok": True}
+
+
+@app.delete("/api/admin/chats/{chat_id}")
+def admin_delete_chat(chat_id: int, admin_user: User = Depends(verify_admin), db: Session = Depends(get_db)):
+    chat = db.query(Chat).filter(Chat.id == chat_id).first()
+    if not chat:
+        raise HTTPException(404, "Chat not found")
+    db.delete(chat)
+    db.commit()
+    return {"ok": True}
+
+
+# ===== PUSH NOTIFICATIONS =====
+
+class PushSubscriptionRequest(BaseModel):
+    endpoint: str
+    p256dh: str
+    auth: str
+
+@app.post("/api/push/subscribe")
+def push_subscribe(req: PushSubscriptionRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    existing = db.query(PushSubscription).filter(PushSubscription.user_id == user.id, PushSubscription.endpoint == req.endpoint).first()
+    if existing:
+        existing.p256dh = req.p256dh
+        existing.auth = req.auth
+    else:
+        db.add(PushSubscription(user_id=user.id, endpoint=req.endpoint, p256dh=req.p256dh, auth=req.auth))
+    db.commit()
+    return {"ok": True}
+
+@app.delete("/api/push/subscribe")
+def push_unsubscribe(req: PushSubscriptionRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    db.query(PushSubscription).filter(PushSubscription.user_id == user.id, PushSubscription.endpoint == req.endpoint).delete()
+    db.commit()
+    return {"ok": True}
+
+@app.get("/api/push/vapid-public-key")
+def get_vapid_public_key():
+    return {"public_key": get_vapid_keys()["public_key"]}
+
+# ===== BLOCKING =====
+
+@app.post("/api/users/{user_id}/block")
+def block_user(user_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if user_id == user.id:
+        raise HTTPException(400, "Cannot block yourself")
+    target = db.query(User).filter(User.id == user_id).first()
+    if not target:
+        raise HTTPException(404, "User not found")
+    existing = db.query(Block).filter(Block.blocker_id == user.id, Block.blocked_id == user_id).first()
+    if existing:
+        return {"ok": True, "already_blocked": True}
+    db.add(Block(blocker_id=user.id, blocked_id=user_id))
+    db.commit()
+    return {"ok": True}
+
+@app.delete("/api/users/{user_id}/block")
+def unblock_user(user_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    db.query(Block).filter(Block.blocker_id == user.id, Block.blocked_id == user_id).delete()
+    db.commit()
+    return {"ok": True}
+
+@app.get("/api/users/blocked")
+def list_blocked(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    blocked = db.query(Block, User).join(User, User.id == Block.blocked_id).filter(Block.blocker_id == user.id).all()
+    return [{"id": u.id, "username": u.username, "display_name": u.display_name, "avatar_url": u.avatar_url} for _, u in blocked]
+
+# ===== CHAT SETTINGS (pin, theme, disappearing) =====
+
+class ChatSettingsRequest(BaseModel):
+    pinned_message_id: Optional[int] = None
+    theme_color: Optional[str] = None
+    disappearing_timer: Optional[int] = None
+    is_hidden: Optional[bool] = None
+    hidden_pin: Optional[str] = None
+
+@app.put("/api/chats/{chat_id}/settings")
+def update_chat_settings(chat_id: int, req: ChatSettingsRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    member = db.query(ChatMember).filter(ChatMember.chat_id == chat_id, ChatMember.user_id == user.id).first()
+    if not member: raise HTTPException(403, "Not a member")
+    chat = db.query(Chat).filter(Chat.id == chat_id).first()
+    if not chat: raise HTTPException(404, "Chat not found")
+    
+    if req.pinned_message_id is not None:
+        if req.pinned_message_id == 0:
+            chat.pinned_message_id = None
+        else:
+            msg = db.query(Message).filter(Message.id == req.pinned_message_id, Message.chat_id == chat_id).first()
+            if not msg: raise HTTPException(404, "Message not found")
+            chat.pinned_message_id = req.pinned_message_id
+            msg.is_pinned = True
+    
+    if req.theme_color is not None:
+        chat.theme_color = req.theme_color
+    
+    if req.disappearing_timer is not None:
+        chat.disappearing_timer = req.disappearing_timer
+    
+    if req.is_hidden is not None:
+        chat.is_hidden = req.is_hidden
+        if req.is_hidden and req.hidden_pin:
+            from passlib.context import CryptContext
+            pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+            chat.hidden_pin_hash = pwd_context.hash(req.hidden_pin)
+        elif not req.is_hidden:
+            chat.hidden_pin_hash = None
+    
+    db.commit()
+    db.refresh(chat)
+    
+    members = db.query(ChatMember).filter(ChatMember.chat_id == chat_id).all()
+    _fire(manager.send_to_chat([m.user_id for m in members],
+        {"type": "chat_update", "chat_id": chat_id, "name": chat.name, "avatar_url": chat.avatar_url, "theme_color": chat.theme_color, "pinned_message_id": chat.pinned_message_id, "disappearing_timer": chat.disappearing_timer}))
+    
+    return {"ok": True, "pinned_message_id": chat.pinned_message_id, "theme_color": chat.theme_color, "disappearing_timer": chat.disappearing_timer}
+
+@app.post("/api/chats/{chat_id}/unhide")
+def unhide_chat(chat_id: int, req: dict, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    chat = db.query(Chat).filter(Chat.id == chat_id).first()
+    if not chat or not chat.is_hidden:
+        raise HTTPException(404, "Chat not found or not hidden")
+    if not chat.hidden_pin_hash:
+        raise HTTPException(400, "No PIN set")
+    from passlib.context import CryptContext
+    pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+    if not pwd_context.verify(req.get("pin", ""), chat.hidden_pin_hash):
+        raise HTTPException(401, "Invalid PIN")
+    return {"ok": True}
+
+# ===== MESSAGE EXPORT =====
+
+@app.get("/api/chats/{chat_id}/export")
+def export_chat(chat_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    member = db.query(ChatMember).filter(ChatMember.chat_id == chat_id, ChatMember.user_id == user.id).first()
+    if not member: raise HTTPException(403, "Not a member")
+    chat = db.query(Chat).filter(Chat.id == chat_id).first()
+    if not chat: raise HTTPException(404, "Chat not found")
+    messages = db.query(Message).filter(Message.chat_id == chat_id).order_by(Message.created_at.asc()).all()
+    members = db.query(ChatMember, User).join(User, User.id == ChatMember.user_id).filter(ChatMember.chat_id == chat_id).all()
+    
+    return {
+        "chat": {"id": chat.id, "name": chat.name, "is_group": chat.is_group},
+        "members": [{"id": u.id, "username": u.username, "display_name": u.display_name, "avatar_url": u.avatar_url} for _, u in members],
+        "messages": [{"id": m.id, "sender_id": m.sender_id, "content": m.content, "message_type": m.message_type, "file_url": m.file_url, "file_name": m.file_name, "reply_to_id": m.reply_to_id, "created_at": m.created_at.isoformat()} for m in messages]
+    }
+
+# ===== ACCOUNT DELETION =====
+
+@app.delete("/api/me")
+def delete_account(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    # Удаляем все данные пользователя
+    db.query(PushSubscription).filter(PushSubscription.user_id == user.id).delete()
+    db.query(Block).filter((Block.blocker_id == user.id) | (Block.blocked_id == user.id)).delete()
+    # Сообщения в чатах, где пользователь участник
+    chat_ids = [m.chat_id for m in db.query(ChatMember).filter(ChatMember.user_id == user.id).all()]
+    for cid in chat_ids:
+        db.query(Message).filter(Message.chat_id == cid, Message.sender_id == user.id).update({Message.is_deleted: True, Message.content: "[аккаунт удален]"})
+    db.query(ChatMember).filter(ChatMember.user_id == user.id).delete()
+    db.query(User).filter(User.id == user.id).delete()
+    db.commit()
+    return {"ok": True}
+
+# ===== STICKERS =====
+
+@app.get("/api/stickers")
+def get_stickers(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    packs = db.query(StickerPack).order_by(StickerPack.id).all()
+    return [{
+        "id": p.id,
+        "name": p.name,
+        "description": p.description,
+        "cover_emoji": p.cover_emoji,
+        "stickers": [{"id": s.id, "emoji": s.emoji, "image_url": s.image_url} for s in p.stickers]
+    } for p in packs]
+
+# ===== LINK PREVIEWS =====
+
+@app.get("/api/link-preview")
+def get_link_preview(url: str = Query(...), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    cached = db.query(LinkPreview).filter(LinkPreview.url == url).first()
+    if cached and (not cached.expires_at or cached.expires_at > datetime.now(timezone.utc)):
+        return {"title": cached.title, "description": cached.description, "image_url": cached.image_url, "site_name": cached.site_name}
+    
+    # Простой парсинг (в продакшене лучше использовать отдельный сервис)
+    try:
+        import httpx
+        from bs4 import BeautifulSoup
+        resp = httpx.get(url, timeout=5, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"})
+        soup = BeautifulSoup(resp.text, "html.parser")
+        title = soup.find("meta", property="og:title") or soup.find("meta", attrs={"name": "twitter:title"}) or soup.find("title")
+        desc = soup.find("meta", property="og:description") or soup.find("meta", attrs={"name": "twitter:description"}) or soup.find("meta", attrs={"name": "description"})
+        img = soup.find("meta", property="og:image") or soup.find("meta", attrs={"name": "twitter:image"})
+        site = soup.find("meta", property="og:site_name") or soup.find("meta", attrs={"name": "twitter:site"})
+        
+        data = {
+            "title": title.get("content") if title and title.get("content") else (title.text if title else ""),
+            "description": desc.get("content") if desc and desc.get("content") else (desc.get("content") if desc else ""),
+            "image_url": img.get("content") if img and img.get("content") else "",
+            "site_name": site.get("content") if site and site.get("content") else ""
+        }
+        
+        expires = datetime.now(timezone.utc).replace(hour=23, minute=59, second=59)
+        if cached:
+            cached.title = data["title"]
+            cached.description = data["description"]
+            cached.image_url = data["image_url"]
+            cached.site_name = data["site_name"]
+            cached.expires_at = expires
+        else:
+            db.add(LinkPreview(url=url, **data, expires_at=expires))
+        db.commit()
+        return data
+    except Exception:
+        return {"title": "", "description": "", "image_url": "", "site_name": ""}
+
+# ===== ADMIN ENHANCEMENTS =====
+
+@app.get("/api/admin/mod-logs")
+def admin_mod_logs(admin_user: User = Depends(verify_admin), db: Session = Depends(get_db), limit: int = 100):
+    logs = db.query(ModLog, User).join(User, User.id == ModLog.admin_id).order_by(ModLog.created_at.desc()).limit(limit).all()
+    return [{
+        "id": log.id,
+        "admin": {"id": u.id, "username": u.username},
+        "action": log.action,
+        "target_type": log.target_type,
+        "target_id": log.target_id,
+        "reason": log.reason,
+        "created_at": log.created_at.isoformat()
+    } for log, u in logs]
+
+@app.post("/api/admin/users/{user_id}/ban")
+def admin_ban_user(user_id: int, req: dict, admin_user: User = Depends(verify_admin), db: Session = Depends(get_db)):
+    if user_id == admin_user.id:
+        raise HTTPException(403, "Cannot ban yourself")
+    target = db.query(User).filter(User.id == user_id).first()
+    if not target:
+        raise HTTPException(404, "User not found")
+    target.is_banned = True
+    db.add(ModLog(admin_id=admin_user.id, action="ban", target_type="user", target_id=user_id, reason=req.get("reason")))
+    db.commit()
+    return {"ok": True}
+
+@app.post("/api/admin/users/{user_id}/unban")
+def admin_unban_user(user_id: int, admin_user: User = Depends(verify_admin), db: Session = Depends(get_db)):
+    target = db.query(User).filter(User.id == user_id).first()
+    if not target:
+        raise HTTPException(404, "User not found")
+    target.is_banned = False
+    db.add(ModLog(admin_id=admin_user.id, action="unban", target_type="user", target_id=user_id))
+    db.commit()
+    return {"ok": True}
+
+@app.post("/api/admin/users/{user_id}/shadow-ban")
+def admin_shadow_ban_user(user_id: int, admin_user: User = Depends(verify_admin), db: Session = Depends(get_db)):
+    target = db.query(User).filter(User.id == user_id).first()
+    if not target:
+        raise HTTPException(404, "User not found")
+    target.is_shadow_banned = True
+    db.add(ModLog(admin_id=admin_user.id, action="shadow_ban", target_type="user", target_id=user_id))
+    db.commit()
+    return {"ok": True}
+
+@app.post("/api/admin/messages/{message_id}/delete")
+def admin_delete_message(message_id: int, req: dict, admin_user: User = Depends(verify_admin), db: Session = Depends(get_db)):
+    msg = db.query(Message).filter(Message.id == message_id).first()
+    if not msg:
+        raise HTTPException(404, "Message not found")
+    msg.is_deleted = True
+    msg.content = "[удалено модератором]"
+    db.add(ModLog(admin_id=admin_user.id, action="delete_message", target_type="message", target_id=message_id, reason=req.get("reason")))
+    db.commit()
+    members = db.query(ChatMember).filter(ChatMember.chat_id == msg.chat_id).all()
+    _fire(manager.send_to_chat([m.user_id for m in members],
+        {"type": "message_deleted", "message_id": message_id, "chat_id": msg.chat_id}))
+    return {"ok": True}
+
+@app.get("/api/admin/stats/detailed")
+def admin_detailed_stats(admin_user: User = Depends(verify_admin), db: Session = Depends(get_db)):
+    from sqlalchemy import func
+    total_users = db.query(func.count(User.id)).scalar() or 0
+    banned_users = db.query(func.count(User.id)).filter(User.is_banned == True).scalar() or 0
+    total_chats = db.query(func.count(Chat.id)).scalar() or 0
+    total_messages = db.query(func.count(Message.id)).scalar() or 0
+    total_reactions = db.query(func.count(Reaction.id)).scalar() or 0
+    online = len(manager.get_online_user_ids())
+    
+    # DAU/MAU approximation
+    week_ago = datetime.now(timezone.utc).replace(day=datetime.now(timezone.utc).day - 7)
+    dau = db.query(func.count(Message.id)).filter(Message.created_at >= week_ago).scalar() or 0
+    
+    return {
+        "users": {"total": total_users, "banned": banned_users, "online": online},
+        "chats": total_chats,
+        "messages": total_messages,
+        "reactions": total_reactions,
+        "dau_approx": dau
+    }
+
+# ===== PWA MANIFEST & SERVICE WORKER =====
+
+@app.get("/manifest.json")
+def manifest():
+    return {
+        "name": "h4ck Messenger",
+        "short_name": "h4ck",
+        "start_url": "/",
+        "display": "standalone",
+        "background_color": "#0a0a0f",
+        "theme_color": "#6c5ce7",
+        "icons": [
+            {"src": "/static/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
+            {"src": "/static/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"}
+        ],
+        "shortcuts": [
+            {"name": "New Chat", "url": "/?new_chat=1", "description": "Start a new chat"},
+            {"name": "Profile", "url": "/?profile=1", "description": "View profile"}
+        ]
+    }
+
+@app.get("/sw.js")
+def service_worker():
+    sw_code = '''
+const CACHE_NAME = 'h4ck-v4.0.0';
+const STATIC_ASSETS = ['/', '/static/style.css', '/static/app.js', '/static/crypto.js', '/manifest.json'];
+
+self.addEventListener('install', e => {
+    e.waitUntil(caches.open(CACHE_NAME).then(cache => cache.addAll(STATIC_ASSETS)));
+    self.skipWaiting();
+});
+
+self.addEventListener('activate', e => {
+    e.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(k => k !== CACHE_NAME).map(k => caches.delete(k)))));
+    self.clients.claim();
+});
+
+self.addEventListener('fetch', e => {
+    if (e.request.method !== 'GET') return;
+    e.respondWith(
+        caches.match(e.request).then(cached => {
+            const network = fetch(e.request).then(resp => {
+                if (resp.ok) caches.open(CACHE_NAME).then(cache => cache.put(e.request, resp.clone()));
+                return resp;
+            }).catch(() => cached);
+            return cached || network;
+        })
+    );
+});
+
+self.addEventListener('push', e => {
+    if (!e.data) return;
+    const data = e.data.json();
+    const options = {
+        body: data.body,
+        icon: '/static/icon-192.png',
+        badge: '/static/icon-192.png',
+        data: { url: data.url || '/' },
+        actions: [{action: 'open', title: 'Open'}, {action: 'close', title: 'Close'}]
+    };
+    e.waitUntil(self.registration.showNotification(data.title, options));
+});
+
+self.addEventListener('notificationclick', e => {
+    e.notification.close();
+    if (e.action === 'close') return;
+    e.waitUntil(clients.matchAll({type: 'window'}).then(clients => {
+        for (const client of clients) {
+            if (client.url.includes(self.location.origin) && 'focus' in client) return client.focus();
+        }
+        return clients.openWindow(e.notification.data.url || '/');
+    }));
+});
+
+self.addEventListener('sync', e => {
+    if (e.tag === 'send-messages') {
+        e.waitUntil(sendQueuedMessages());
+    }
+});
+
+async function sendQueuedMessages() {
+    const db = await openDB();
+    const tx = db.transaction('outbox', 'readwrite');
+    const store = tx.objectStore('outbox');
+    const messages = await store.getAll();
+    for (const msg of messages) {
+        try {
+            await fetch(msg.url, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(msg.body)});
+            await store.delete(msg.id);
+        } catch {}
+    }
+}
+
+function openDB() {
+    return new Promise((resolve, reject) => {
+        const req = indexedDB.open('h4ck-outbox', 1);
+        req.onupgradeneeded = e => e.target.result.createObjectStore('outbox', {keyPath: 'id', autoIncrement: true});
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+    });
+}
+'''
+    from fastapi.responses import PlainTextResponse
+    return PlainTextResponse(sw_code, media_type="application/javascript")
+
+@app.post("/api/outbox/queue")
+def queue_offline_message(req: dict, user: User = Depends(get_current_user)):
+    # Для хранения в IndexedDB на клиенте, здесь просто подтверждаем
+    return {"ok": True, "id": str(uuid.uuid4())}
+
 app.mount("/static", StaticFiles(directory=CLIENT_DIR), name="static")
 
+
 @app.get("/", response_class=HTMLResponse)
-async def root(): return FileResponse(os.path.join(CLIENT_DIR, "index.html"))
+async def root():
+    html = (Path(CLIENT_DIR) / "index.html").read_text(encoding="utf-8")
+    html = html.replace('v2.2', f'v{get_version()}')
+    return HTMLResponse(html)
