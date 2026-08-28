@@ -13,7 +13,27 @@ from cryptography.hazmat.primitives import serialization
 
 from .database import get_db, User
 
-SECRET_KEY = os.environ.get("MESSENGER_SECRET", os.urandom(32).hex())
+_SECRET_FILE = os.path.join(os.path.dirname(__file__), ".secret_key")
+
+
+def _load_or_create_secret() -> str:
+    env = os.environ.get("MESSENGER_SECRET")
+    if env:
+        return env
+    try:
+        if os.path.isfile(_SECRET_FILE):
+            val = open(_SECRET_FILE, "r").read().strip()
+            if val:
+                return val
+        val = os.urandom(32).hex()
+        with open(_SECRET_FILE, "w") as f:
+            f.write(val)
+        return val
+    except Exception:
+        return os.urandom(32).hex()
+
+
+SECRET_KEY = _load_or_create_secret()
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_HOURS = 24
 

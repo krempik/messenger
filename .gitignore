@@ -7,3 +7,11 @@ cloudflared.exe
 *.exe
 tunnel.json
 *.log
+.pytest_cache/
+.idea/
+.vscode/
+.env
+.secret_key
+.DS_Store
+Thumbs.db
+*.egg-info/

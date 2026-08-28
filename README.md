@@ -27,11 +27,17 @@ python -m uvicorn server.main:app --host 0.0.0.0 --port 8000
 
 | Метод | Эндпоинт | Описание |
 |-------|-----------|----------|
-| `POST` | `/api/auth/register` | Регистрация |
-| `POST` | `/api/auth/login` | Вход |
+| `POST` | `/api/register` | Регистрация |
+| `POST` | `/api/login` | Вход (access + refresh токены) |
+| `POST` | `/api/refresh` | Обновление access-токена |
+| `GET` | `/api/me` | Текущий пользователь |
+| `GET` | `/api/users` | Список пользователей |
 | `GET` | `/api/chats` | Список чатов |
 | `POST` | `/api/chats` | Создать чат |
-| `WS` | `/ws/{token}` | WebSocket для реалтайма |
+| `GET` | `/api/chats/{chat_id}/messages` | Сообщения чата |
+| `WS` | `/ws?token=...` | WebSocket для реалтайма |
+| `POST` | `/api/upload` | Загрузка файла |
+| `POST` | `/api/admin/login` | Вход администратора |
 
 ## Стек
 

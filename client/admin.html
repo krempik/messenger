@@ -201,7 +201,7 @@
             const pass = document.getElementById('login-pass').value;
             const err = document.getElementById('login-error');
             try {
-                const r = await fetch(API + '/api/auth/login', {
+                const r = await fetch(API + '/api/admin/login', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({username: user, password: pass})
@@ -252,6 +252,12 @@
             } catch(e) {}
         }
 
+        function esc(v) {
+            return String(v ?? '').replace(/[&<>"']/g, c => (
+                {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]
+            ));
+        }
+
         async function loadUsers() {
             try {
                 const r = await apiFetch('/api/admin/users');
@@ -259,9 +265,9 @@
                 const users = await r.json();
                 const tbody = document.getElementById('users-table');
                 tbody.innerHTML = users.map(u => `<tr>
-                    <td>${u.id}</td>
-                    <td>${u.username}</td>
-                    <td>${u.bio || '-'}</td>
+                    <td>${esc(u.id)}</td>
+                    <td>${esc(u.username)}</td>
+                    <td>${esc(u.bio || '-')}</td>
                     <td>${u.created_at ? new Date(u.created_at).toLocaleDateString('ru-RU') : '-'}</td>
                     <td><span class="badge">user</span></td>
                 </tr>`).join('');
@@ -275,10 +281,10 @@
                 const chats = await r.json();
                 const tbody = document.getElementById('chats-table');
                 tbody.innerHTML = chats.map(c => `<tr>
-                    <td>${c.id}</td>
-                    <td>${c.name || 'direct'}</td>
-                    <td><span class="badge">${c.type || 'private'}</span></td>
-                    <td>${c.member_count || '?'}</td>
+                    <td>${esc(c.id)}</td>
+                    <td>${esc(c.name || 'direct')}</td>
+                    <td><span class="badge">${esc(c.type || 'private')}</span></td>
+                    <td>${esc(c.member_count || '?')}</td>
                     <td>${c.created_at ? new Date(c.created_at).toLocaleDateString('ru-RU') : '-'}</td>
                 </tr>`).join('');
             } catch(e) {}
@@ -291,7 +297,7 @@
                 const logs = await r.json();
                 const out = document.getElementById('logs-output');
                 out.innerHTML = logs.map(l =>
-                    `<div style="margin-bottom:0.3rem;"><span style="color:var(--dim)">${l.time || ''}</span> <span style="color:var(--green)">${l.action || ''}</span> <span>${l.detail || ''}</span></div>`
+                    `<div style="margin-bottom:0.3rem;"><span style="color:var(--dim)">${esc(l.time || '')}</span> <span style="color:var(--green)">${esc(l.action || '')}</span> <span>${esc(l.detail || '')}</span></div>`
                 ).join('');
             } catch(e) {}
         }

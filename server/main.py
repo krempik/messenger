@@ -8,7 +8,7 @@ import time
 import asyncio
 from typing import Optional
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect, UploadFile, File, Query, Request, status
@@ -20,7 +20,7 @@ from sqlalchemy import func
 from pydantic import BaseModel, field_validator
 
 from .database import get_db, User, Chat, ChatMember, Message, Reaction, MessageRead, GroupKey, SessionLocal, PushSubscription, Block, ModLog, StickerPack, Sticker, LinkPreview
-from .auth import hash_password, verify_password, create_access_token, authenticate_ws_token, get_current_user, SECRET_KEY, get_vapid_keys
+from .auth import hash_password, verify_password, create_access_token, authenticate_ws_token, get_current_user, SECRET_KEY, get_vapid_keys, create_refresh_token, decode_refresh_token
 from .websocket_manager import manager
 
 BASE_DIR = Path(__file__).parent.parent
@@ -29,7 +29,7 @@ def get_version():
     try:
         return VERSION_FILE.read_text().strip()
     except Exception:
-        return "2.2.1"
+        return "5.0.0"
 
 _loop: Optional[asyncio.AbstractEventLoop] = None
 
@@ -151,7 +151,7 @@ def _stop_tunnel():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _loop
-    _loop = asyncio.get_event_loop()
+    _loop = asyncio.get_running_loop()
     _start_tunnel()
     # Start WebSocket cleanup task
     manager._cleanup_task = asyncio.create_task(manager._cleanup_stale_connections())
@@ -166,7 +166,7 @@ async def lifespan(app: FastAPI):
     _stop_tunnel()
 
 app = FastAPI(title="H4ck Messenger", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 
 UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -286,7 +286,7 @@ def update_me(req: UpdateProfileRequest, user: User = Depends(get_current_user),
     if req.password:
         if len(req.password) < 6: raise HTTPException(400, "Password min 6 chars")
         user.password_hash = hash_password(req.password)
-    if req.public_key and len(req.public_key) > 100: user.public_key = req.public_key
+    if req.public_key and len(req.public_key) <= 4096: user.public_key = req.public_key
     if req.bio is not None: user.bio = req.bio[:512]
     db.commit(); db.refresh(user)
     _fire(manager.broadcast({"type": "profile_update", "user_id": user.id,
@@ -305,7 +305,7 @@ async def upload_avatar(file: UploadFile = File(...), user: User = Depends(get_c
         old = os.path.join(UPLOAD_DIR, user.avatar_url.split("/")[-1])
         if os.path.isfile(old):
             try: os.remove(old)
-            except: pass
+            except Exception: pass
     user.avatar_url = f"/uploads/{name}"
     db.commit(); db.refresh(user)
     return user_dict(user)
@@ -464,15 +464,16 @@ def get_messages(chat_id: int, before_id: Optional[int] = None, limit: int = 50,
 def mark_read(chat_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     member = db.query(ChatMember).filter(ChatMember.chat_id == chat_id, ChatMember.user_id == user.id).first()
     if not member: raise HTTPException(403, "Not a member")
+    prev_read = member.last_read_id or 0
     max_id = db.query(func.max(Message.id)).filter(Message.chat_id == chat_id).scalar() or 0
-    member.last_read_id = max_id
     unread_msgs = db.query(Message).filter(
-        Message.chat_id == chat_id, Message.sender_id != user.id, Message.id > member.last_read_id
+        Message.chat_id == chat_id, Message.sender_id != user.id, Message.id > prev_read
     ).all()
     for msg in unread_msgs:
         existing = db.query(MessageRead).filter(MessageRead.message_id == msg.id, MessageRead.user_id == user.id).first()
         if not existing:
             db.add(MessageRead(message_id=msg.id, user_id=user.id))
+    member.last_read_id = max_id
     db.commit()
     members = db.query(ChatMember).filter(ChatMember.chat_id == chat_id).all()
     _fire(manager.send_to_chat([m.user_id for m in members],
@@ -1071,7 +1072,7 @@ def admin_detailed_stats(admin_user: User = Depends(verify_admin), db: Session =
     online = len(manager.get_online_user_ids())
     
     # DAU/MAU approximation
-    week_ago = datetime.now(timezone.utc).replace(day=datetime.now(timezone.utc).day - 7)
+    week_ago = datetime.now(timezone.utc) - timedelta(days=7)
     dau = db.query(func.count(Message.id)).filter(Message.created_at >= week_ago).scalar() or 0
     
     return {
@@ -1106,7 +1107,7 @@ def manifest():
 @app.get("/sw.js")
 def service_worker():
     sw_code = '''
-const CACHE_NAME = 'h4ck-v4.0.0';
+const CACHE_NAME = 'h4ck-v__VERSION__';
 const STATIC_ASSETS = ['/', '/static/style.css', '/static/app.js', '/static/crypto.js', '/manifest.json'];
 
 self.addEventListener('install', e => {
@@ -1184,6 +1185,7 @@ function openDB() {
     });
 }
 '''
+    sw_code = sw_code.replace('__VERSION__', get_version())
     from fastapi.responses import PlainTextResponse
     return PlainTextResponse(sw_code, media_type="application/javascript")
 

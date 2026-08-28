@@ -239,6 +239,7 @@
     function logout() {
         token = null; currentUser = null; currentChatId = null;
         localStorage.removeItem("token"); localStorage.removeItem("user"); localStorage.removeItem("user_id");
+        localStorage.removeItem("private_key"); localStorage.removeItem("public_key");
         if (ws) ws.close(); if (chatInterval) clearInterval(chatInterval);
         $("#chat-area").classList.add("hidden");
         $("#chat-view").classList.add("hidden");
@@ -501,10 +502,14 @@
                         if (!currentChatId) return;
                         const gifUrl = result.media_formats?.gif?.url;
                         try {
-                            await api(`/api/chats/${currentChatId}/messages`, {
-                                method: "POST",
-                                body: { content: result.title || "GIF", message_type: "file", file_url: gifUrl, file_name: "gif.gif" }
-                            });
+                            ws.send(JSON.stringify({
+                                type: "message",
+                                chat_id: currentChatId,
+                                content: result.title || "GIF",
+                                message_type: "file",
+                                file_url: gifUrl,
+                                file_name: "gif.gif"
+                            }));
                             $("#gif-picker").classList.add("hidden");
                             toast("GIF отправлен", "success");
                         } catch { toast("Ошибка", "error"); }
