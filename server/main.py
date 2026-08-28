@@ -42,14 +42,19 @@ _tunnel_process: Optional[subprocess.Popen] = None
 _tunnel_config: Optional[dict] = None
 HOST_START_TIME = time.time()
 
+ALLOWED_AVATAR_MIMES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
 MAX_AVATAR_SIZE = 5 * 1024 * 1024
 MAX_FILE_SIZE = 100 * 1024 * 1024
 ALLOWED_AVATAR_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
-UNSAFE_UPLOAD_EXTS = {".html", ".htm", ".svg", ".xhtml", ".php", ".jsp"}
+UNSAFE_UPLOAD_EXTS = {".html", ".htm", ".svg", ".xhtml", ".php", ".jsp", ".py", ".pyc", ".sh", ".bat", ".cmd"}
+BLOCKED_UPLOAD_MIMES = {"text/html", "text/javascript", "application/javascript", "image/svg+xml"}
+ALLOWED_IMAGE_MIMES = {"image/jpeg", "image/png", "image/gif", "image/webp", "image/svg+xml", "image/apng", "image/avif", "image/bmp", "image/x-icon", "text/plain", "audio/mpeg", "audio/webm", "audio/wav", "audio/ogg", "video/mp4", "video/webm", "video/ogg", "video/quicktime", "video/x-matroska", "application/zip", "application/x-zip-compressed", "application/pdf", "application/x-rar-compressed", "application/x-7z-compressed", "application/json", "application/octet-stream", "application/x-msdownload"}
 
 _rate_limit_store: dict[str, list[float]] = {}
+_rate_limit_store_admin: dict[str, list[float]] = {}
 _RATE_LIMIT_WINDOW = 60
 _RATE_LIMIT_MAX_REQUESTS = 120
+_RATE_LIMIT_ADMIN_MAX = 30
 
 
 def _check_rate_limit(client_ip: str) -> bool:
@@ -61,6 +66,20 @@ def _check_rate_limit(client_ip: str) -> bool:
     while requests and requests[0] < window_start:
         requests.pop(0)
     if len(requests) >= _RATE_LIMIT_MAX_REQUESTS:
+        return False
+    requests.append(now)
+    return True
+
+
+def _check_rate_limit_admin(client_ip: str) -> bool:
+    now = time.time()
+    window_start = now - _RATE_LIMIT_WINDOW
+    if client_ip not in _rate_limit_store_admin:
+        _rate_limit_store_admin[client_ip] = []
+    requests = _rate_limit_store_admin[client_ip]
+    while requests and requests[0] < window_start:
+        requests.pop(0)
+    if len(requests) >= _RATE_LIMIT_ADMIN_MAX:
         return False
     requests.append(now)
     return True
@@ -180,9 +199,10 @@ def get_version_endpoint():
 
 @app.middleware("http")
 async def rate_limit_middleware(request: Request, call_next):
-    if request.url.path.startswith("/api/") and not request.url.path.startswith("/api/admin/"):
+    if request.url.path.startswith("/api/"):
         client_ip = _get_client_ip(request)
-        if not _check_rate_limit(client_ip):
+        limit = 30 if request.url.path.startswith("/api/admin/") else _RATE_LIMIT_MAX_REQUESTS
+        if not _check_rate_limit_admin(client_ip) if request.url.path.startswith("/api/admin/") else not _check_rate_limit(client_ip):
             raise HTTPException(status_code=429, detail="Rate limit exceeded")
     response = await call_next(request)
     return response
@@ -211,7 +231,8 @@ class ForwardMessageRequest(BaseModel):
 def user_dict(u):
     return {"id": u.id, "username": u.username, "display_name": u.display_name,
             "bio": getattr(u, "bio", "") or "", "public_key": u.public_key,
-            "avatar_url": u.avatar_url, "online": manager.is_online(u.id)}
+            "avatar_url": u.avatar_url, "online": manager.is_online(u.id),
+            "is_admin": bool(getattr(u, "is_admin", False))}
 
 def message_dict(m, db=None):
     d = {"id": m.id, "chat_id": m.chat_id, "sender_id": m.sender_id,
@@ -297,7 +318,10 @@ def update_me(req: UpdateProfileRequest, user: User = Depends(get_current_user),
 async def upload_avatar(file: UploadFile = File(...), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     ext = os.path.splitext(file.filename or "")[1].lower()
     if ext not in ALLOWED_AVATAR_EXTS: raise HTTPException(400, "Only jpg, png, gif, webp")
+    mime = (file.content_type or "").lower()
+    if mime and mime not in ALLOWED_AVATAR_MIMES: raise HTTPException(400, "Only jpg, png, gif, webp")
     content = await file.read()
+    if not content: raise HTTPException(400, "Empty file")
     if len(content) > MAX_AVATAR_SIZE: raise HTTPException(400, "Max 5MB")
     name = f"avatar_{user.id}_{uuid.uuid4().hex}{ext}"
     with open(os.path.join(UPLOAD_DIR, name), "wb") as f: f.write(content)
@@ -352,7 +376,10 @@ async def upload_chat_avatar(chat_id: int, file: UploadFile = File(...),
     if not chat or not chat.is_group: raise HTTPException(400, "Only group chats")
     ext = os.path.splitext(file.filename or "")[1].lower()
     if ext not in ALLOWED_AVATAR_EXTS: raise HTTPException(400, "Only jpg, png, gif, webp")
+    mime = (file.content_type or "").lower()
+    if mime and mime not in ALLOWED_AVATAR_MIMES: raise HTTPException(400, "Only jpg, png, gif, webp")
     content = await file.read()
+    if not content: raise HTTPException(400, "Empty file")
     if len(content) > MAX_AVATAR_SIZE: raise HTTPException(400, "Max 5MB")
     name = f"chat_{chat_id}_{uuid.uuid4().hex}{ext}"
     with open(os.path.join(UPLOAD_DIR, name), "wb") as f: f.write(content)
@@ -577,9 +604,14 @@ def get_group_key(chat_id: int, user: User = Depends(get_current_user), db: Sess
 @app.post("/api/upload")
 async def upload_file(file: UploadFile = File(...), user: User = Depends(get_current_user)):
     ext = os.path.splitext(file.filename or "")[1].lower()
-    if ext in UNSAFE_UPLOAD_EXTS: ext = ".bin"
+    if ext in UNSAFE_UPLOAD_EXTS: raise HTTPException(400, "Extension not allowed")
+    mime = (file.content_type or "").lower()
+    if mime in BLOCKED_UPLOAD_MIMES: raise HTTPException(400, "File type not allowed")
     content = await file.read()
+    if not content: raise HTTPException(400, "Empty file")
     if len(content) > MAX_FILE_SIZE: raise HTTPException(400, "Max 100MB")
+    if ext in {".py", ".js", ".htm", ".html", ".xml"} and not mime:
+        raise HTTPException(400, "File type not allowed")
     name = f"{uuid.uuid4().hex}{ext}"
     with open(os.path.join(UPLOAD_DIR, name), "wb") as f: f.write(content)
     return {"url": f"/uploads/{name}", "name": file.filename}
@@ -753,8 +785,9 @@ def admin_stats(admin_user: User = Depends(verify_admin), db: Session = Depends(
 
 @app.get("/api/admin/users")
 def admin_users(admin_user: User = Depends(verify_admin), db: Session = Depends(get_db)):
-    users = db.query(User).all()
-    return [{"id": u.id, "username": u.username, "bio": u.bio,
+    users = db.query(User).order_by(User.id).all()
+    return [{"id": u.id, "username": u.username, "display_name": u.display_name, "bio": u.bio,
+             "is_admin": bool(u.is_admin), "is_banned": bool(u.is_banned), "is_shadow_banned": bool(u.is_shadow_banned),
              "created_at": u.created_at.isoformat() if u.created_at else None} for u in users]
 
 
@@ -765,14 +798,21 @@ def admin_chats(admin_user: User = Depends(verify_admin), db: Session = Depends(
     for c in chats:
         member_count = db.query(func.count(ChatMember.id)).filter(ChatMember.chat_id == c.id).scalar() or 0
         result.append({"id": c.id, "name": c.name, "is_group": c.is_group,
-                       "member_count": member_count,
+                       "member_count": member_count, "is_hidden": bool(c.is_hidden),
                        "created_at": c.created_at.isoformat() if c.created_at else None})
     return result
 
 
 @app.get("/api/admin/logs")
-def admin_logs(admin_user: User = Depends(verify_admin), limit: int = 50):
-    return [{"time": datetime.now(timezone.utc).isoformat(), "action": "heartbeat", "detail": "admin polling"}]
+def admin_logs(admin_user: User = Depends(verify_admin), db: Session = Depends(get_db), limit: int = 50):
+    logs = db.query(ModLog).order_by(ModLog.created_at.desc()).limit(limit).all()
+    if not logs:
+        return [{"time": datetime.now(timezone.utc).isoformat(), "action": "heartbeat", "detail": "admin polling"}]
+    return [{
+        "time": log.created_at.isoformat() if log.created_at else None,
+        "action": log.action,
+        "detail": f"#{log.target_type}:{log.target_id}" + (f" — {log.reason}" if log.reason else "")
+    } for log in logs]
 
 
 @app.delete("/api/admin/users/{user_id}")
@@ -782,6 +822,16 @@ def admin_delete_user(user_id: int, admin_user: User = Depends(verify_admin), db
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(404, "User not found")
+    db.query(PushSubscription).filter(PushSubscription.user_id == user_id).delete()
+    db.query(Block).filter((Block.blocker_id == user_id) | (Block.blocked_id == user_id)).delete()
+    db.query(Reaction).filter(Reaction.user_id == user_id).delete()
+    db.query(MessageRead).filter(MessageRead.user_id == user_id).delete()
+    db.query(GroupKey).filter(GroupKey.user_id == user_id).delete()
+    chat_ids = [m.chat_id for m in db.query(ChatMember).filter(ChatMember.user_id == user_id).all()]
+    for cid in chat_ids:
+        db.query(Message).filter(Message.chat_id == cid, Message.sender_id == user_id).update({Message.is_deleted: True, Message.content: "[аккаунт удален]"})
+    db.query(ChatMember).filter(ChatMember.user_id == user_id).delete()
+    db.add(ModLog(admin_id=admin_user.id, action="delete_user", target_type="user", target_id=user_id))
     db.delete(user)
     db.commit()
     return {"ok": True}
@@ -792,6 +842,17 @@ def admin_delete_chat(chat_id: int, admin_user: User = Depends(verify_admin), db
     chat = db.query(Chat).filter(Chat.id == chat_id).first()
     if not chat:
         raise HTTPException(404, "Chat not found")
+    members = db.query(ChatMember).filter(ChatMember.chat_id == chat_id).all()
+    member_ids = [m.user_id for m in members]
+    _fire(manager.send_to_chat(member_ids, {"type": "chat_deleted", "chat_id": chat_id}))
+    db.query(Reaction).filter(Reaction.message_id.in_(
+        db.query(Message.id).filter(Message.chat_id == chat_id))).delete(synchronize_session=False)
+    db.query(MessageRead).filter(MessageRead.message_id.in_(
+        db.query(Message.id).filter(Message.chat_id == chat_id))).delete(synchronize_session=False)
+    db.query(Message).filter(Message.chat_id == chat_id).delete()
+    db.query(ChatMember).filter(ChatMember.chat_id == chat_id).delete()
+    db.query(GroupKey).filter(GroupKey.chat_id == chat_id).delete()
+    db.add(ModLog(admin_id=admin_user.id, action="delete_chat", target_type="chat", target_id=chat_id))
     db.delete(chat)
     db.commit()
     return {"ok": True}

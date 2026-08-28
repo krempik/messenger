@@ -113,6 +113,11 @@
             <div class="login-box">
                 <h2>&gt; admin login</h2>
                 <div class="form-group">
+                    <label>&gt; server URL:</label>
+                    <input type="url" id="login-server" placeholder="https://your-tunnel.trycloudflare.com">
+                    <p style="color:var(--dim);font-size:11px;margin-top:4px">пусто = этот адрес</p>
+                </div>
+                <div class="form-group">
                     <label>&gt; username:</label>
                     <input type="text" id="login-user" placeholder="admin">
                 </div>
@@ -159,7 +164,7 @@
                 <button class="refresh-btn" onclick="loadUsers()">&gt; refresh</button>
                 <table>
                     <thead>
-                        <tr><th>ID</th><th>Username</th><th>Bio</th><th>Создан</th><th>Статус</th></tr>
+                        <tr><th>ID</th><th>Username</th><th>Name</th><th>Bio</th><th>Статус</th><th>Создан</th><th>Действия</th></tr>
                     </thead>
                     <tbody id="users-table"></tbody>
                 </table>
@@ -169,7 +174,7 @@
                 <button class="refresh-btn" onclick="loadChats()">&gt; refresh</button>
                 <table>
                     <thead>
-                        <tr><th>ID</th><th>Название</th><th>Тип</th><th>Участники</th><th>Создан</th></tr>
+                        <tr><th>ID</th><th>Название</th><th>Тип</th><th>Участники</th><th>Скрыт</th><th>Создан</th><th>Действия</th></tr>
                     </thead>
                     <tbody id="chats-table"></tbody>
                 </table>
@@ -183,8 +188,11 @@
     </div>
 
     <script>
-        const API = window.location.origin;
+        let serverUrl = localStorage.getItem('server_url') || '';
+        let API = serverUrl ? serverUrl.replace(/\/+$/, '') : window.location.origin.replace(/\/+$/, '');
         let token = localStorage.getItem('admin_token');
+
+        document.getElementById('login-server').value = serverUrl;
 
         // Tabs
         document.querySelectorAll('.tab').forEach(tab => {
@@ -197,6 +205,10 @@
         });
 
         async function doLogin() {
+            const srv = document.getElementById('login-server').value.trim().replace(/\/+$/, '');
+            serverUrl = srv;
+            API = serverUrl || window.location.origin.replace(/\/+$/, '');
+            srv ? localStorage.setItem('server_url', srv) : localStorage.removeItem('server_url');
             const user = document.getElementById('login-user').value;
             const pass = document.getElementById('login-pass').value;
             const err = document.getElementById('login-error');
@@ -266,12 +278,31 @@
                 const tbody = document.getElementById('users-table');
                 tbody.innerHTML = users.map(u => `<tr>
                     <td>${esc(u.id)}</td>
-                    <td>${esc(u.username)}</td>
+                    <td>${esc(u.username)}${u.is_admin ? ' <span class="badge" style="border-color:var(--green);color:var(--green)">admin</span>' : ''}</td>
+                    <td>${esc(u.display_name || '-')}</td>
                     <td>${esc(u.bio || '-')}</td>
+                    <td>${u.is_banned ? '<span class="badge" style="border-color:var(--red);color:var(--red)">BANNED</span>' : u.is_shadow_banned ? '<span class="badge" style="border-color:var(--yellow);color:var(--yellow)">shadow</span>' : '<span class="badge">user</span>'}</td>
                     <td>${u.created_at ? new Date(u.created_at).toLocaleDateString('ru-RU') : '-'}</td>
-                    <td><span class="badge">user</span></td>
+                    <td>
+                        ${u.is_admin ? '' : u.is_banned
+                            ? `<button class="refresh-btn" style="display:inline" onclick="adminUnban(${u.id})">unban</button>`
+                            : `<button class="refresh-btn" style="display:inline" onclick="adminBan(${u.id})">ban</button>`}
+                        <button class="refresh-btn" style="display:inline;border-color:var(--red);color:var(--red)" onclick="adminDeleteUser(${u.id})">del</button>
+                    </td>
                 </tr>`).join('');
             } catch(e) {}
+        }
+
+        async function adminBan(id) {
+            if (!confirm("Забанить пользователя?")) return;
+            try { const r = await apiFetch('/api/admin/users/' + id + '/ban', {method:'POST', body: JSON.stringify({reason:'admin'})}); location.reload(); } catch {}
+        }
+        async function adminUnban(id) {
+            try { const r = await apiFetch('/api/admin/users/' + id + '/unban', {method:'POST', body: JSON.stringify({})}); loadUsers(); } catch {}
+        }
+        async function adminDeleteUser(id) {
+            if (!confirm("Удалить пользователя? Это удалит все его данные.")) return;
+            try { const r = await apiFetch('/api/admin/users/' + id, {method:'DELETE'}); loadUsers(); loadStats(); } catch {}
         }
 
         async function loadChats() {
@@ -283,11 +314,17 @@
                 tbody.innerHTML = chats.map(c => `<tr>
                     <td>${esc(c.id)}</td>
                     <td>${esc(c.name || 'direct')}</td>
-                    <td><span class="badge">${esc(c.type || 'private')}</span></td>
+                    <td><span class="badge">${c.is_group ? 'group' : 'private'}</span></td>
                     <td>${esc(c.member_count || '?')}</td>
+                    <td>${c.is_hidden ? '<span style="color:var(--yellow)">yes</span>' : '-'}</td>
                     <td>${c.created_at ? new Date(c.created_at).toLocaleDateString('ru-RU') : '-'}</td>
+                    <td><button class="refresh-btn" style="display:inline;border-color:var(--red);color:var(--red)" onclick="adminDeleteChat(${c.id})">del</button></td>
                 </tr>`).join('');
             } catch(e) {}
+        }
+        async function adminDeleteChat(id) {
+            if (!confirm("Удалить чат со всеми сообщениями?")) return;
+            try { const r = await apiFetch('/api/admin/chats/' + id, {method:'DELETE'}); loadChats(); loadStats(); } catch {}
         }
 
         async function loadLogs() {

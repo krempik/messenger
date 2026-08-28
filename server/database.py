@@ -1,10 +1,13 @@
 import os
 import json
-from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, ForeignKey, Boolean, UniqueConstraint, Index, LargeBinary
+import logging
+from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, ForeignKey, Boolean, UniqueConstraint, Index, LargeBinary, inspect
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from datetime import datetime, timezone
 
-DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "messenger.db")
+log = logging.getLogger("h4ck.db")
+
+DB_PATH = os.environ.get("MESSENGER_DB", os.path.join(os.path.dirname(os.path.dirname(__file__)), "messenger.db"))
 engine = create_engine(f"sqlite:///{DB_PATH}", connect_args={"check_same_thread": False}, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine)
 Base = declarative_base()
@@ -191,7 +194,40 @@ class LinkPreview(Base):
     expires_at = Column(DateTime, nullable=True)
 
 
+def _auto_migrate():
+    """Add missing columns to existing tables without destroying data."""
+    inspector = inspect(engine)
+    existing_tables = inspector.get_table_names()
+    migrated = []
+
+    for table_name, table in Base.metadata.tables.items():
+        if table_name not in existing_tables:
+            continue
+        existing_cols = {c["name"] for c in inspector.get_columns(table_name)}
+        for col in table.columns:
+            if col.name not in existing_cols:
+                col_type = col.type.compile(engine.dialect)
+                nullable = "NULL" if col.nullable else "NOT NULL"
+                default_val = ""
+                if col.default is not None and col.default.is_scalar:
+                    default_val = f" DEFAULT {repr(col.default.arg)}"
+                elif col.nullable:
+                    default_val = " DEFAULT NULL"
+                sql = f"ALTER TABLE {table_name} ADD COLUMN {col.name} {col_type} {nullable}{default_val}"
+                try:
+                    with engine.connect() as conn:
+                        conn.execute(__import__("sqlalchemy").text(sql))
+                        conn.commit()
+                    migrated.append(f"{table_name}.{col.name}")
+                except Exception as e:
+                    log.warning(f"Migration skip {table_name}.{col.name}: {e}")
+
+    if migrated:
+        log.info(f"Auto-migrated columns: {', '.join(migrated)}")
+
+
 Base.metadata.create_all(bind=engine)
+_auto_migrate()
 
 
 def get_db():

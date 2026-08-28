@@ -27,7 +27,11 @@ if not exist "venv" (
 
 echo [*] Installing dependencies...
 call venv\Scripts\activate.bat
-pip install -r requirements.txt -q
+if exist "requirements.lock" (
+    pip install -r requirements.lock -q
+) else (
+    pip install -r requirements.txt -q
+)
 
 if exist "tunnel.json" (
     echo [*] Permanent tunnel configured

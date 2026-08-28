@@ -1,0 +1,15 @@
+# Genereted by: pip freeze — pinned exact versions for reproducible releases
+# Usage: pip install -r requirements.lock
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+SQLAlchemy==2.0.52
+python-jose[cryptography]==3.5.0
+passlib[bcrypt]==1.7.4
+python-multipart==0.0.32
+pydantic==2.13.4
+cryptography==50.0.1
+bcrypt==4.2.1
+websockets==17.0.1
+httpx==0.28.1
+beautifulsoup4==4.15.0
+pytest==9.1.1

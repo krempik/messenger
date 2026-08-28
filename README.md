@@ -11,7 +11,25 @@ python -m uvicorn server.main:app --host 0.0.0.0 --port 8000
 
 Или через `run.bat` (Windows) — автоматически создаёт venv и устанавливает зависимости.
 
+Иногда пины точных версий: `pip install -r requirements.lock` (генерируется `pip freeze`).
+
 Клиент: http://localhost:8000
+
+## Переменные окружения (продакшн)
+
+| Переменная | Назначение |
+|-----------|-----------|
+| `MESSENGER_SECRET` | Секрет подписи JWT (если не задан — генерируется и хранится в `.secret_key`) |
+| `VAPID_PRIVATE_KEY` | Приватный ключ VAPID для Web Push |
+| `VAPID_PUBLIC_KEY` | Публичный ключ VAPID для Web Push |
+| `MESSENGER_DB` | Путь к файлу БД (по умолчанию `messenger.db`) |
+
+При обновлении версии БД мигрирует автоматически (добавляет недостающие колонки), данные сохраняются.
+
+## CI/CD
+
+GitHub Actions (`.github/workflows/ci.yml`) прогоняет тесты при каждом push в `main`.
+Секреты для CI: `MESSENGER_SECRET`, `VAPID_PRIVATE_KEY`, `VAPID_PUBLIC_KEY`.
 
 ## Архитектура шифрования
 

@@ -213,8 +213,8 @@
         updateMyAvatar();
         $("#sidebar").classList.remove("hidden");
         
-        // Show admin button for kremp
-        if (currentUser.username === "kremp") {
+        // Show admin button if user is admin
+        if (currentUser.is_admin) {
             $("#admin-btn").classList.remove("hidden");
         }
         
