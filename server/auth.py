@@ -1,5 +1,6 @@
 import os
 import base64
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -13,6 +14,8 @@ from cryptography.hazmat.primitives import serialization
 
 from .database import get_db, User
 
+log = logging.getLogger("h4ck.auth")
+
 _SECRET_FILE = os.path.join(os.path.dirname(__file__), ".secret_key")
 
 
@@ -22,14 +25,18 @@ def _load_or_create_secret() -> str:
         return env
     try:
         if os.path.isfile(_SECRET_FILE):
-            val = open(_SECRET_FILE, "r").read().strip()
+            with open(_SECRET_FILE, "r") as f:
+                val = f.read().strip()
             if val:
                 return val
         val = os.urandom(32).hex()
         with open(_SECRET_FILE, "w") as f:
             f.write(val)
         return val
-    except Exception:
+    except Exception as e:
+        # Last resort: ephemeral random secret. All JWTs will be invalidated
+        # on restart — log so it is never silent.
+        log.warning(f"could not read/write {_SECRET_FILE}: {e}; using ephemeral secret")
         return os.urandom(32).hex()
 
 
@@ -42,6 +49,7 @@ VAPID_PRIVATE_KEY = os.environ.get("VAPID_PRIVATE_KEY")
 VAPID_PUBLIC_KEY = os.environ.get("VAPID_PUBLIC_KEY")
 
 if not VAPID_PRIVATE_KEY or not VAPID_PUBLIC_KEY:
+    log.warning("VAPID env vars not set; generating ephemeral keys (push subs will break on restart)")
     private_key = ec.generate_private_key(ec.SECP256R1())
     public_key = private_key.public_key()
     VAPID_PRIVATE_KEY = base64.urlsafe_b64encode(
@@ -77,7 +85,11 @@ def create_access_token(user_id: int) -> str:
 
 def decode_token(token: str) -> Optional[dict]:
     try:
-        return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM], options={"require_exp": True}, issuer="h4ck-messenger")
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM], options={"require_exp": True}, issuer="h4ck-messenger")
+        # Refresh tokens must never be used as access tokens.
+        if payload.get("type") == "refresh":
+            return None
+        return payload
     except JWTError:
         return None
 
@@ -94,6 +106,8 @@ def get_current_user(
     user = db.query(User).filter(User.id == int(payload["sub"])).first()
     if not user:
         raise HTTPException(401, "User not found")
+    if user.is_banned:
+        raise HTTPException(403, "Account is banned")
     return user
 
 
@@ -101,7 +115,10 @@ def authenticate_ws_token(token: str, db: Session) -> Optional[User]:
     payload = decode_token(token)
     if not payload:
         return None
-    return db.query(User).filter(User.id == int(payload["sub"])).first()
+    user = db.query(User).filter(User.id == int(payload["sub"])).first()
+    if not user or user.is_banned:
+        return None
+    return user
 
 
 def create_refresh_token(user_id: int) -> str:
@@ -120,10 +137,6 @@ def decode_refresh_token(token: str) -> Optional[dict]:
         return payload
     except JWTError:
         return None
-
-
-def get_secret_key() -> str:
-    return SECRET_KEY
 
 
 def get_vapid_keys():

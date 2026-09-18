@@ -2,6 +2,9 @@ import os
 import re
 import json
 import uuid
+import socket
+import ipaddress
+import logging
 import subprocess
 import threading
 import time
@@ -19,23 +22,38 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 from pydantic import BaseModel, field_validator
 
-from .database import get_db, User, Chat, ChatMember, Message, Reaction, MessageRead, GroupKey, SessionLocal, PushSubscription, Block, ModLog, StickerPack, Sticker, LinkPreview
-from .auth import hash_password, verify_password, create_access_token, authenticate_ws_token, get_current_user, SECRET_KEY, get_vapid_keys, create_refresh_token, decode_refresh_token
+from .database import get_db, User, Chat, ChatMember, Message, Reaction, MessageRead, GroupKey, SessionLocal, PushSubscription, Block, ModLog, StickerPack, Sticker, LinkPreview, ensure_schema
+from .auth import hash_password, verify_password, create_access_token, authenticate_ws_token, get_current_user, get_vapid_keys, create_refresh_token, decode_refresh_token
 from .websocket_manager import manager
+
+log = logging.getLogger("h4ck.server")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
 BASE_DIR = Path(__file__).parent.parent
 VERSION_FILE = BASE_DIR / "VERSION"
 def get_version():
     try:
         return VERSION_FILE.read_text().strip()
-    except Exception:
-        return "5.0.0"
+    except Exception as e:
+        log.warning(f"could not read VERSION file: {e}")
+        return "6.0.0"
 
 _loop: Optional[asyncio.AbstractEventLoop] = None
 
+
 def _fire(coro):
+    def _on_done(fut):
+        try:
+            fut.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            log.exception("background coroutine failed")
     if _loop and not _loop.is_closed():
-        asyncio.run_coroutine_threadsafe(coro, _loop)
+        fut = asyncio.run_coroutine_threadsafe(coro, _loop)
+        fut.add_done_callback(_on_done)
+    else:
+        log.warning("no event loop running; dropped coroutine %r", coro)
 
 TUNNEL_URL: Optional[str] = None
 _tunnel_process: Optional[subprocess.Popen] = None
@@ -46,49 +64,78 @@ ALLOWED_AVATAR_MIMES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
 MAX_AVATAR_SIZE = 5 * 1024 * 1024
 MAX_FILE_SIZE = 100 * 1024 * 1024
 ALLOWED_AVATAR_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
-UNSAFE_UPLOAD_EXTS = {".html", ".htm", ".svg", ".xhtml", ".php", ".jsp", ".py", ".pyc", ".sh", ".bat", ".cmd"}
+UNSAFE_UPLOAD_EXTS = {".html", ".htm", ".svg", ".xhtml", ".php", ".jsp", ".py", ".pyc", ".sh", ".bat", ".cmd", ".js", ".mjs", ".xml", ".url", ".xhtml"}
 BLOCKED_UPLOAD_MIMES = {"text/html", "text/javascript", "application/javascript", "image/svg+xml"}
-ALLOWED_IMAGE_MIMES = {"image/jpeg", "image/png", "image/gif", "image/webp", "image/svg+xml", "image/apng", "image/avif", "image/bmp", "image/x-icon", "text/plain", "audio/mpeg", "audio/webm", "audio/wav", "audio/ogg", "video/mp4", "video/webm", "video/ogg", "video/quicktime", "video/x-matroska", "application/zip", "application/x-zip-compressed", "application/pdf", "application/x-rar-compressed", "application/x-7z-compressed", "application/json", "application/octet-stream", "application/x-msdownload"}
+ALLOWED_IMAGE_MIMES = {"image/jpeg", "image/png", "image/gif", "image/webp", "image/apng", "image/avif", "image/bmp", "image/x-icon", "text/plain", "audio/mpeg", "audio/webm", "audio/wav", "audio/ogg", "video/mp4", "video/webm", "video/ogg", "video/quicktime", "video/x-matroska", "application/zip", "application/x-zip-compressed", "application/pdf", "application/x-rar-compressed", "application/x-7z-compressed", "application/json", "application/octet-stream", "application/x-msdownload"}
+# Magic-byte sniff rules: extension alone is attacker-controlled, so when the
+# client claims an image type, the content must actually match it.
+_MAGIC_SNIFF = {
+    ".jpg": [b"\xff\xd8\xff"], ".jpeg": [b"\xff\xd8\xff"], ".png": [b"\x89PNG\r\n\x1a\n"],
+    ".gif": [b"GIF8"], ".webp": [b"RIFF"],
+}
+
+
+def _content_matches_ext(content: bytes, ext: str) -> bool:
+    magic = _MAGIC_SNIFF.get(ext)
+    if not magic:
+        return True
+    if ext in (".jpg", ".jpeg", ".png", ".gif"):
+        return content.startswith(magic[0])
+    return content.startswith(b"RIFF") and len(content) >= 12 and content[8:12] == b"WEBP"
 
 _rate_limit_store: dict[str, list[float]] = {}
 _rate_limit_store_admin: dict[str, list[float]] = {}
 _RATE_LIMIT_WINDOW = 60
 _RATE_LIMIT_MAX_REQUESTS = 120
 _RATE_LIMIT_ADMIN_MAX = 30
+TRUST_PROXY = os.environ.get("TRUST_PROXY", "").lower() in {"1", "true", "yes"}
+
+
+def _prune_rate_store(store: dict[str, list[float]]):
+    now = time.time()
+    for key in [k for k, entries in store.items() if not entries or entries[-1] < now - _RATE_LIMIT_WINDOW]:
+        del store[key]
 
 
 def _check_rate_limit(client_ip: str) -> bool:
     now = time.time()
     window_start = now - _RATE_LIMIT_WINDOW
-    if client_ip not in _rate_limit_store:
-        _rate_limit_store[client_ip] = []
-    requests = _rate_limit_store[client_ip]
-    while requests and requests[0] < window_start:
-        requests.pop(0)
-    if len(requests) >= _RATE_LIMIT_MAX_REQUESTS:
+    entries = _rate_limit_store.get(client_ip)
+    if entries is None:
+        _rate_limit_store[client_ip] = [now]
+        _prune_rate_store(_rate_limit_store)
+        return True
+    while entries and entries[0] < window_start:
+        entries.pop(0)
+    if len(entries) >= _RATE_LIMIT_MAX_REQUESTS:
         return False
-    requests.append(now)
+    entries.append(now)
+    _prune_rate_store(_rate_limit_store)
     return True
 
 
 def _check_rate_limit_admin(client_ip: str) -> bool:
     now = time.time()
     window_start = now - _RATE_LIMIT_WINDOW
-    if client_ip not in _rate_limit_store_admin:
-        _rate_limit_store_admin[client_ip] = []
-    requests = _rate_limit_store_admin[client_ip]
-    while requests and requests[0] < window_start:
-        requests.pop(0)
-    if len(requests) >= _RATE_LIMIT_ADMIN_MAX:
+    entries = _rate_limit_store_admin.get(client_ip)
+    if entries is None:
+        _rate_limit_store_admin[client_ip] = [now]
+        _prune_rate_store(_rate_limit_store_admin)
+        return True
+    while entries and entries[0] < window_start:
+        entries.pop(0)
+    if len(entries) >= _RATE_LIMIT_ADMIN_MAX:
         return False
-    requests.append(now)
+    entries.append(now)
+    _prune_rate_store(_rate_limit_store_admin)
     return True
 
 
 def _get_client_ip(request: Request) -> str:
-    forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
+    if TRUST_PROXY:
+        forwarded = request.headers.get("X-Forwarded-For")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
     return request.client.host if request.client else "unknown"
 
 
@@ -110,8 +157,8 @@ def _load_tunnel_config():
         try:
             with open(p) as f:
                 return json.load(f)
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning(f"could not read tunnel.json: {e}")
     return None
 
 
@@ -159,11 +206,12 @@ def _stop_tunnel():
         try:
             _tunnel_process.terminate()
             _tunnel_process.wait(timeout=3)
-        except Exception:
+        except Exception as e:
+            log.warning(f"tunnel terminate failed: {e}")
             try:
                 _tunnel_process.kill()
-            except Exception:
-                pass
+            except Exception as e2:
+                log.warning(f"tunnel kill failed: {e2}")
         _tunnel_process = None
 
 
@@ -171,6 +219,7 @@ def _stop_tunnel():
 async def lifespan(app: FastAPI):
     global _loop
     _loop = asyncio.get_running_loop()
+    ensure_schema()
     _start_tunnel()
     # Start WebSocket cleanup task
     manager._cleanup_task = asyncio.create_task(manager._cleanup_stale_connections())
@@ -184,8 +233,19 @@ async def lifespan(app: FastAPI):
             pass
     _stop_tunnel()
 
+
 app = FastAPI(title="H4ck Messenger", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    # Stored-file XSS guard: content-sniffing can turn a .txt upload into HTML.
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    if request.url.path.startswith("/uploads/"):
+        response.headers["Content-Disposition"] = "inline; filename=\"upload\""
+    return response
 
 UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -222,10 +282,34 @@ class UpdateChatRequest(BaseModel):
     theme_color: Optional[str] = None
 class ReactionRequest(BaseModel):
     emoji: str
+    @field_validator("emoji")
+    @classmethod
+    def _emoji_safe(cls, v: str) -> str:
+        v = v.strip()
+        if not v or len(v) > 16 or any(ch in v for ch in "<>/\\\"'"):
+            raise ValueError("invalid emoji")
+        return v
 class EditMessageRequest(BaseModel):
     content: str; encrypted_key: Optional[str] = None; sender_encrypted_key: Optional[str] = None
+    @field_validator("content")
+    @classmethod
+    def _content_capped(cls, v: str) -> str:
+        if len(v) > 10000:
+            raise ValueError("message too long")
+        return v
 class ForwardMessageRequest(BaseModel):
     chat_id: int
+class RefreshRequest(BaseModel):
+    refresh_token: str
+    @field_validator("refresh_token")
+    @classmethod
+    def _token_nonempty(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("empty token")
+        return v
+
+THEME_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 
 
 def user_dict(u):
@@ -234,22 +318,34 @@ def user_dict(u):
             "avatar_url": u.avatar_url, "online": manager.is_online(u.id),
             "is_admin": bool(getattr(u, "is_admin", False))}
 
-def message_dict(m, db=None):
+def message_dict(m, db=None, hide_shadowed=False):
+    sender_name = m.sender.display_name if m.sender else "Удалённый пользователь"
+    content = m.content
+    encrypted_key = m.encrypted_key
+    sender_encrypted_key = m.sender_encrypted_key
+    if hide_shadowed and m.sender and m.sender.is_shadow_banned:
+        content = "[скрыто]"
+        encrypted_key = None
+        sender_encrypted_key = None
     d = {"id": m.id, "chat_id": m.chat_id, "sender_id": m.sender_id,
-         "sender_name": m.sender.display_name, "sender_avatar": m.sender.avatar_url,
-         "content": m.content, "encrypted_key": m.encrypted_key,
-         "sender_encrypted_key": m.sender_encrypted_key, "message_type": m.message_type,
-         "file_url": m.file_url, "file_name": m.file_name,
+         "sender_name": sender_name, "sender_avatar": m.sender.avatar_url if m.sender else None,
+         "content": content, "encrypted_key": encrypted_key,
+         "sender_encrypted_key": sender_encrypted_key, "message_type": m.message_type,
+         "file_url": m.file_url if not hide_shadowed or not (m.sender and m.sender.is_shadow_banned) else None,
+         "file_name": m.file_name,
          "reply_to_id": m.reply_to_id, "is_edited": m.is_edited, "is_deleted": m.is_deleted,
          "created_at": m.created_at.isoformat()}
     if m.reply_to:
         d["reply_to_content"] = m.reply_to.content if not m.reply_to.is_deleted else "[удалено]"
-        d["reply_to_sender"] = m.reply_to.sender.display_name
+        d["reply_to_sender"] = m.reply_to.sender.display_name if m.reply_to.sender else "Удалённый пользователь"
     if db:
         reacts = db.query(Reaction).filter(Reaction.message_id == m.id).all()
-        d["reactions"] = [{"emoji": r.emoji, "user_id": r.user_id, "user_name": r.user.display_name} for r in reacts]
+        d["reactions"] = [{"emoji": r.emoji, "user_id": r.user_id,
+                           "user_name": r.user.display_name if r.user else "Удалённый пользователь"} for r in reacts]
         reads = db.query(MessageRead).filter(MessageRead.message_id == m.id).all()
-        d["read_by"] = [{"user_id": r.user_id, "user_name": r.user.display_name, "read_at": r.read_at.isoformat()} for r in reads]
+        d["read_by"] = [{"user_id": r.user_id,
+                         "user_name": r.user.display_name if r.user else "Удалённый пользователь",
+                         "read_at": r.read_at.isoformat() if r.read_at else None} for r in reads]
     return d
 
 USERNAME_RE = re.compile(r"^[a-zA-Z0-9_]{3,32}$")
@@ -260,6 +356,9 @@ def register(req: RegisterRequest, db: Session = Depends(get_db)):
     if not USERNAME_RE.match(req.username): raise HTTPException(400, "Username: 3-32 chars, a-z, 0-9, _")
     if len(req.password) < 6: raise HTTPException(400, "Password min 6 characters")
     if len(req.display_name) > 128: raise HTTPException(400, "Display name too long")
+    if len(req.display_name) < 1: raise HTTPException(400, "Display name required")
+    if not (100 < len(req.public_key) <= 2048) or not req.public_key.strip().startswith("-----BEGIN PUBLIC KEY-----"):
+        raise HTTPException(400, "Public key required (PEM, ≤2048 chars)")
     if db.query(User).filter(User.username == req.username).first(): raise HTTPException(409, "Username taken")
     user = User(username=req.username, display_name=req.display_name,
                 password_hash=hash_password(req.password), public_key=req.public_key)
@@ -270,6 +369,7 @@ def register(req: RegisterRequest, db: Session = Depends(get_db)):
 def login(req: LoginRequest, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.username == req.username).first()
     if not user or not verify_password(req.password, user.password_hash): raise HTTPException(401, "Invalid credentials")
+    if user.is_banned: raise HTTPException(403, "Account is banned")
     return {
         "token": create_access_token(user.id),
         "refresh_token": create_refresh_token(user.id),
@@ -278,17 +378,16 @@ def login(req: LoginRequest, db: Session = Depends(get_db)):
 
 
 @app.post("/api/refresh")
-def refresh_token(req: dict, db: Session = Depends(get_db)):
-    refresh = req.get("refresh_token")
-    if not refresh:
-        raise HTTPException(400, "Refresh token required")
-    payload = decode_refresh_token(refresh)
+def refresh_token(req: RefreshRequest, db: Session = Depends(get_db)):
+    payload = decode_refresh_token(req.refresh_token)
     if not payload:
         raise HTTPException(401, "Invalid or expired refresh token")
     user_id = int(payload["sub"])
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(401, "User not found")
+    if user.is_banned:
+        raise HTTPException(403, "Account is banned")
     return {
         "token": create_access_token(user.id),
         "refresh_token": create_refresh_token(user.id),
@@ -323,6 +422,7 @@ async def upload_avatar(file: UploadFile = File(...), user: User = Depends(get_c
     content = await file.read()
     if not content: raise HTTPException(400, "Empty file")
     if len(content) > MAX_AVATAR_SIZE: raise HTTPException(400, "Max 5MB")
+    if not _content_matches_ext(content, ext): raise HTTPException(400, "File content does not match its type")
     name = f"avatar_{user.id}_{uuid.uuid4().hex}{ext}"
     with open(os.path.join(UPLOAD_DIR, name), "wb") as f: f.write(content)
     if user.avatar_url and "avatar_" in (user.avatar_url or ""):
@@ -340,20 +440,24 @@ def list_users(user: User = Depends(get_current_user), db: Session = Depends(get
             for u in db.query(User).filter(User.id != user.id).all()]
 
 @app.get("/api/users/{user_id}")
-def get_user(user_id: int, db: Session = Depends(get_db)):
+def get_user(user_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     u = db.query(User).filter(User.id == user_id).first()
     if not u: raise HTTPException(404, "User not found")
     return {**user_dict(u), "online": manager.is_online(u.id)}
 
 @app.get("/api/users/{user_id}/public-key")
-def get_public_key(user_id: int, db: Session = Depends(get_db)):
+def get_public_key(user_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     u = db.query(User).filter(User.id == user_id).first()
     if not u: raise HTTPException(404, "User not found")
     return {"public_key": u.public_key, "user_id": u.id}
 
 @app.post("/api/chats")
 def create_chat(req: CreateChatRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    member_ids = [mid for mid in req.member_ids if mid != user.id]
+    if len(req.member_ids) > 200:
+        raise HTTPException(400, "Max 200 members")
+    member_ids = list(dict.fromkeys(mid for mid in req.member_ids if mid != user.id))
+    if req.theme_color and not THEME_COLOR_RE.match(req.theme_color):
+        raise HTTPException(400, "Invalid theme color")
     if len(member_ids) == 1:
         existing = (db.query(Chat).join(ChatMember, ChatMember.chat_id == Chat.id)
             .filter(Chat.is_group == False, ChatMember.user_id.in_([user.id, member_ids[0]]))
@@ -381,6 +485,7 @@ async def upload_chat_avatar(chat_id: int, file: UploadFile = File(...),
     content = await file.read()
     if not content: raise HTTPException(400, "Empty file")
     if len(content) > MAX_AVATAR_SIZE: raise HTTPException(400, "Max 5MB")
+    if not _content_matches_ext(content, ext): raise HTTPException(400, "File content does not match its type")
     name = f"chat_{chat_id}_{uuid.uuid4().hex}{ext}"
     with open(os.path.join(UPLOAD_DIR, name), "wb") as f: f.write(content)
     chat.avatar_url = f"/uploads/{name}"
@@ -405,8 +510,11 @@ def add_chat_members(chat_id: int, req: AddMembersRequest, user: User = Depends(
     if not member: raise HTTPException(403, "Not a member")
     chat = db.query(Chat).filter(Chat.id == chat_id).first()
     if not chat or not chat.is_group: raise HTTPException(400, "Only group chats")
+    if len(req.member_ids) > 200: raise HTTPException(400, "Max 200 members")
     added = 0
     for mid in req.member_ids:
+        if not db.query(User).filter(User.id == mid).first():
+            raise HTTPException(404, f"User {mid} not found")
         exists = db.query(ChatMember).filter(ChatMember.chat_id == chat_id, ChatMember.user_id == mid).first()
         if not exists:
             db.add(ChatMember(chat_id=chat_id, user_id=mid)); added += 1
@@ -459,7 +567,7 @@ def list_chats(user: User = Depends(get_current_user), db: Session = Depends(get
             "avatar_url": chat.avatar_url, "theme_color": chat.theme_color, "other_user": other_user,
             "members": [{**user_dict(u), "online": u.id in online_ids, "role": m.role} for m, u in members],
             "unread": unread_map.get(cid, 0),
-            "last_message": message_dict(last_msg) if last_msg else None})
+            "last_message": message_dict(last_msg, hide_shadowed=True) if last_msg else None})
     result.sort(key=lambda c: c["last_message"]["created_at"] if c["last_message"] else "", reverse=True)
     return result
 
@@ -484,7 +592,7 @@ def get_messages(chat_id: int, before_id: Optional[int] = None, limit: int = 50,
     if before_id: q = q.filter(Message.id < before_id)
     msgs = q.order_by(Message.created_at.desc()).limit(limit).all()
     msgs.reverse()
-    return [message_dict(m, db) for m in msgs]
+    return [message_dict(m, db, hide_shadowed=True) for m in msgs]
 
 
 @app.post("/api/chats/{chat_id}/read")
@@ -524,6 +632,8 @@ def update_chat(chat_id: int, req: UpdateChatRequest, user: User = Depends(get_c
     member = db.query(ChatMember).filter(ChatMember.chat_id == chat_id, ChatMember.user_id == user.id).first()
     if not member: raise HTTPException(403, "Not a member")
     if req.name is not None: chat.name = req.name[:128]
+    if req.theme_color is not None and not THEME_COLOR_RE.match(req.theme_color or ""):
+        raise HTTPException(400, "Invalid theme color")
     if req.theme_color is not None: chat.theme_color = req.theme_color[:7] if req.theme_color else None
     db.commit(); db.refresh(chat)
     members = db.query(ChatMember).filter(ChatMember.chat_id == chat_id).all()
@@ -587,9 +697,17 @@ def upload_group_key(chat_id: int, req: UploadGroupKeyRequest, user: User = Depe
     for ek in req.encrypted_keys:
         if not isinstance(ek, dict) or "user_id" not in ek or "encrypted_key" not in ek:
             raise HTTPException(400, "Invalid encrypted_key format")
-        existing = db.query(GroupKey).filter(GroupKey.chat_id == chat_id, GroupKey.user_id == ek["user_id"]).first()
+        target_id = ek["user_id"]
+        # A member may only write their own wrapped group key; otherwise a
+        # malicious member could swap another user's key for one wrapped to
+        # their own key and break the E2E scheme.
+        if target_id != user.id and member.role not in ("owner", "admin"):
+            raise HTTPException(403, "Can only update your own group key")
+        if not db.query(User).filter(User.id == target_id).first():
+            raise HTTPException(404, f"User {target_id} not found")
+        existing = db.query(GroupKey).filter(GroupKey.chat_id == chat_id, GroupKey.user_id == target_id).first()
         if existing: existing.encrypted_key = ek["encrypted_key"]; existing.key_version = req.key_version
-        else: db.add(GroupKey(chat_id=chat_id, user_id=ek["user_id"], encrypted_key=ek["encrypted_key"], key_version=req.key_version))
+        else: db.add(GroupKey(chat_id=chat_id, user_id=target_id, encrypted_key=ek["encrypted_key"], key_version=req.key_version))
     db.commit()
     return {"ok": True}
 
@@ -610,8 +728,10 @@ async def upload_file(file: UploadFile = File(...), user: User = Depends(get_cur
     content = await file.read()
     if not content: raise HTTPException(400, "Empty file")
     if len(content) > MAX_FILE_SIZE: raise HTTPException(400, "Max 100MB")
-    if ext in {".py", ".js", ".htm", ".html", ".xml"} and not mime:
+    if ext in {".py", ".js", ".htm", ".html", ".xml", ".svg"} and not mime:
         raise HTTPException(400, "File type not allowed")
+    if mime in ALLOWED_IMAGE_MIMES and not _content_matches_ext(content, ext):
+        raise HTTPException(400, "File content does not match its type")
     name = f"{uuid.uuid4().hex}{ext}"
     with open(os.path.join(UPLOAD_DIR, name), "wb") as f: f.write(content)
     return {"url": f"/uploads/{name}", "name": file.filename}
@@ -620,6 +740,8 @@ async def upload_file(file: UploadFile = File(...), user: User = Depends(get_cur
 def add_reaction(message_id: int, req: ReactionRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     msg = db.query(Message).filter(Message.id == message_id).first()
     if not msg: raise HTTPException(404, "Message not found")
+    if not db.query(ChatMember).filter(ChatMember.chat_id == msg.chat_id, ChatMember.user_id == user.id).first():
+        raise HTTPException(403, "Not a member of this chat")
     existing = db.query(Reaction).filter(Reaction.message_id == message_id,
         Reaction.user_id == user.id, Reaction.emoji == req.emoji).first()
     if existing:
@@ -677,7 +799,7 @@ def forward_message(message_id: int, req: ForwardMessageRequest, user: User = De
     db.add(fwd); db.commit(); db.refresh(fwd)
     members = db.query(ChatMember).filter(ChatMember.chat_id == req.chat_id).all()
     _fire(manager.send_to_chat([m.user_id for m in members],
-        {"type": "message", "message": message_dict(fwd, db)}))
+        {"type": "message", "message": message_dict(fwd, db, hide_shadowed=True)}))
     return {"ok": True, "message_id": fwd.id}
 
 app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
@@ -686,49 +808,70 @@ app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
     db = SessionLocal()
+    user = None
     try:
         user = authenticate_ws_token(token, db)
-        if not user: await websocket.close(code=4001); return
+        if not user:
+            await websocket.close(code=4001)
+            return
         await manager.connect(websocket, user.id)
         user.last_seen = datetime.now(timezone.utc); db.commit()
         await manager.broadcast({"type": "presence", "user_id": user.id, "online": True})
         try:
             while True:
-                raw = await websocket.receive_text()
-                data = json.loads(raw)
+                raw = await asyncio.wait_for(websocket.receive_text(), timeout=90)
+                try:
+                    data = json.loads(raw)
+                except (ValueError, TypeError):
+                    log.warning(f"malformed ws payload from user {user.id}")
+                    continue
+                if not isinstance(data, dict):
+                    continue
                 t = data.get("type")
                 if t == "message":
-                    chat_id = data["chat_id"]
+                    chat_id = data.get("chat_id")
+                    content = str(data.get("content") or "")[:10000]
                     if not db.query(ChatMember).filter(ChatMember.chat_id == chat_id, ChatMember.user_id == user.id).first():
                         await websocket.send_text(json.dumps({"type": "error", "detail": "Not a member"})); continue
-                    msg = Message(chat_id=chat_id, sender_id=user.id, content=data["content"],
-                        encrypted_key=data.get("encrypted_key"), sender_encrypted_key=data.get("sender_encrypted_key"),
-                        message_type=data.get("message_type", "text"), file_url=data.get("file_url"),
-                        file_name=data.get("file_name"), reply_to_id=data.get("reply_to_id"))
+                    msg = Message(chat_id=chat_id, sender_id=user.id, content=content,
+                        encrypted_key=str(data.get("encrypted_key") or None), sender_encrypted_key=str(data.get("sender_encrypted_key") or None),
+                        message_type=str(data.get("message_type") or "text")[:32], file_url=str(data.get("file_url") or None),
+                        file_name=str(data.get("file_name") or None)[:256], reply_to_id=data.get("reply_to_id"))
                     db.add(msg); db.commit(); db.refresh(msg)
                     members = db.query(ChatMember).filter(ChatMember.chat_id == chat_id).all()
                     await manager.send_to_chat([m.user_id for m in members],
-                        {"type": "message", "message": message_dict(msg, db)})
+                        {"type": "message", "message": message_dict(msg, db, hide_shadowed=True)})
                 elif t == "typing":
-                    chat_id = data["chat_id"]
+                    chat_id = data.get("chat_id")
+                    if not db.query(ChatMember).filter(ChatMember.chat_id == chat_id, ChatMember.user_id == user.id).first():
+                        continue
                     members = db.query(ChatMember).filter(ChatMember.chat_id == chat_id).all()
                     await manager.send_to_chat([m.user_id for m in members],
                         {"type": "typing", "chat_id": chat_id, "user_id": user.id,
                          "user_name": user.display_name}, exclude_user=user.id)
                 elif t == "read":
-                    chat_id = data["chat_id"]
+                    chat_id = data.get("chat_id")
+                    if not db.query(ChatMember).filter(ChatMember.chat_id == chat_id, ChatMember.user_id == user.id).first():
+                        continue
                     members = db.query(ChatMember).filter(ChatMember.chat_id == chat_id).all()
                     await manager.send_to_chat([m.user_id for m in members],
                         {"type": "read", "chat_id": chat_id, "user_id": user.id}, exclude_user=user.id)
+        except asyncio.TimeoutError:
+            log.info(f"ws idle timeout, closing user {user.id}")
         except WebSocketDisconnect:
             pass
         except Exception as e:
-            print(f"[WS Error] {e}")
+            log.warning(f"[WS Error] user {user.id}: {e!r}")
         finally:
             manager.disconnect(websocket, user.id)
             user.last_seen = datetime.now(timezone.utc); db.commit()
             await manager.broadcast({"type": "presence", "user_id": user.id, "online": False})
-    finally: db.close()
+    except asyncio.CancelledError:
+        if user:
+            manager.disconnect(websocket, user.id)
+        raise
+    finally:
+        db.close()
 
 
 @app.get("/api/tunnel-url")
@@ -822,18 +965,7 @@ def admin_delete_user(user_id: int, admin_user: User = Depends(verify_admin), db
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(404, "User not found")
-    db.query(PushSubscription).filter(PushSubscription.user_id == user_id).delete()
-    db.query(Block).filter((Block.blocker_id == user_id) | (Block.blocked_id == user_id)).delete()
-    db.query(Reaction).filter(Reaction.user_id == user_id).delete()
-    db.query(MessageRead).filter(MessageRead.user_id == user_id).delete()
-    db.query(GroupKey).filter(GroupKey.user_id == user_id).delete()
-    chat_ids = [m.chat_id for m in db.query(ChatMember).filter(ChatMember.user_id == user_id).all()]
-    for cid in chat_ids:
-        db.query(Message).filter(Message.chat_id == cid, Message.sender_id == user_id).update({Message.is_deleted: True, Message.content: "[аккаунт удален]"})
-    db.query(ChatMember).filter(ChatMember.user_id == user_id).delete()
-    db.add(ModLog(admin_id=admin_user.id, action="delete_user", target_type="user", target_id=user_id))
-    db.delete(user)
-    db.commit()
+    _delete_user_complete(db, user, by_admin_id=admin_user.id)
     return {"ok": True}
 
 
@@ -947,9 +1079,7 @@ def update_chat_settings(chat_id: int, req: ChatSettingsRequest, user: User = De
     if req.is_hidden is not None:
         chat.is_hidden = req.is_hidden
         if req.is_hidden and req.hidden_pin:
-            from passlib.context import CryptContext
-            pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-            chat.hidden_pin_hash = pwd_context.hash(req.hidden_pin)
+            chat.hidden_pin_hash = hash_password(req.hidden_pin)
         elif not req.is_hidden:
             chat.hidden_pin_hash = None
     
@@ -964,14 +1094,14 @@ def update_chat_settings(chat_id: int, req: ChatSettingsRequest, user: User = De
 
 @app.post("/api/chats/{chat_id}/unhide")
 def unhide_chat(chat_id: int, req: dict, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if not db.query(ChatMember).filter(ChatMember.chat_id == chat_id, ChatMember.user_id == user.id).first():
+        raise HTTPException(403, "Not a member")
     chat = db.query(Chat).filter(Chat.id == chat_id).first()
     if not chat or not chat.is_hidden:
         raise HTTPException(404, "Chat not found or not hidden")
     if not chat.hidden_pin_hash:
         raise HTTPException(400, "No PIN set")
-    from passlib.context import CryptContext
-    pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-    if not pwd_context.verify(req.get("pin", ""), chat.hidden_pin_hash):
+    if not verify_password(req.get("pin", ""), chat.hidden_pin_hash):
         raise HTTPException(401, "Invalid PIN")
     return {"ok": True}
 
@@ -994,18 +1124,54 @@ def export_chat(chat_id: int, user: User = Depends(get_current_user), db: Sessio
 
 # ===== ACCOUNT DELETION =====
 
+def _remove_upload_file(url: Optional[str]):
+    if not url:
+        return
+    name = url.split("/")[-1]
+    if not name:
+        return
+    path = os.path.join(UPLOAD_DIR, name)
+    try:
+        if os.path.isfile(path):
+            os.remove(path)
+    except Exception as e:
+        log.warning(f"could not remove upload {name}: {e}")
+
+
+def _delete_user_complete(db: Session, user: User, by_admin_id: Optional[int] = None, reason: Optional[str] = None):
+    # Collect uploaded files owned by the user before the rows referencing
+    # them disappear, so cleanup can run afterwards.
+    file_urls = [m.file_url for m in
+                 db.query(Message).filter(Message.sender_id == user.id, Message.file_url.isnot(None)).all()] + [user.avatar_url]
+    chat_ids = [m.chat_id for m in db.query(ChatMember).filter(ChatMember.user_id == user.id).all()]
+
+    # Messages the user sent: with FK enforcement these would cascade via
+    # users.sent_messages, but delete explicitly in the right order.
+    db.query(Message).filter(Message.sender_id == user.id).delete(synchronize_session=False)
+    db.query(ChatMember).filter(ChatMember.user_id == user.id).delete(synchronize_session=False)
+    for cid in chat_ids:
+        if db.query(ChatMember).filter(ChatMember.chat_id == cid).count() == 0:
+            db.query(Message).filter(Message.chat_id == cid).delete(synchronize_session=False)
+            chat = db.query(Chat).filter(Chat.id == cid).first()
+            if chat:
+                db.delete(chat)
+    db.query(Reaction).filter(Reaction.user_id == user.id).delete(synchronize_session=False)
+    db.query(MessageRead).filter(MessageRead.user_id == user.id).delete(synchronize_session=False)
+    db.query(GroupKey).filter(GroupKey.user_id == user.id).delete(synchronize_session=False)
+    db.query(PushSubscription).filter(PushSubscription.user_id == user.id).delete(synchronize_session=False)
+    db.query(Block).filter((Block.blocker_id == user.id) | (Block.blocked_id == user.id)).delete(synchronize_session=False)
+    if by_admin_id:
+        db.add(ModLog(admin_id=by_admin_id, action="delete_user", target_type="user", target_id=user.id, reason=reason))
+    db.delete(user)
+    db.commit()
+    for url in file_urls:
+        _remove_upload_file(url)
+    manager.disconnect_user(user.id)
+
+
 @app.delete("/api/me")
 def delete_account(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    # Удаляем все данные пользователя
-    db.query(PushSubscription).filter(PushSubscription.user_id == user.id).delete()
-    db.query(Block).filter((Block.blocker_id == user.id) | (Block.blocked_id == user.id)).delete()
-    # Сообщения в чатах, где пользователь участник
-    chat_ids = [m.chat_id for m in db.query(ChatMember).filter(ChatMember.user_id == user.id).all()]
-    for cid in chat_ids:
-        db.query(Message).filter(Message.chat_id == cid, Message.sender_id == user.id).update({Message.is_deleted: True, Message.content: "[аккаунт удален]"})
-    db.query(ChatMember).filter(ChatMember.user_id == user.id).delete()
-    db.query(User).filter(User.id == user.id).delete()
-    db.commit()
+    _delete_user_complete(db, user)
     return {"ok": True}
 
 # ===== STICKERS =====
@@ -1023,30 +1189,46 @@ def get_stickers(user: User = Depends(get_current_user), db: Session = Depends(g
 
 # ===== LINK PREVIEWS =====
 
+def _validate_preview_url(raw: str) -> str:
+    """Reject SSRF targets: non-http(s) schemes, private/link-local/loopback IPs."""
+    url = (raw or "").strip()
+    if len(url) > 2048:
+        raise HTTPException(400, "URL too long")
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+    except ValueError:
+        raise HTTPException(400, "Invalid URL")
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise HTTPException(400, "Only http(s) links allowed")
+    try:
+        infos = socket.getaddrinfo(parsed.hostname, None)
+    except socket.gaierror:
+        raise HTTPException(400, "Unresolvable host")
+    for family, _socktype, _proto, _canon, sockaddr in infos:
+        if family == socket.AF_INET6 and not sockaddr[4]:
+            continue  # tentative address, skip
+        ip = ipaddress.ip_address(sockaddr[0])
+        if (ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
+            raise HTTPException(400, "This address is not allowed")
+    return url
+
+
 @app.get("/api/link-preview")
 def get_link_preview(url: str = Query(...), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    cached = db.query(LinkPreview).filter(LinkPreview.url == url).first()
+    safe_url = _validate_preview_url(url)
+    cached = db.query(LinkPreview).filter(LinkPreview.url == safe_url).first()
     if cached and (not cached.expires_at or cached.expires_at > datetime.now(timezone.utc)):
         return {"title": cached.title, "description": cached.description, "image_url": cached.image_url, "site_name": cached.site_name}
-    
+
     # Простой парсинг (в продакшене лучше использовать отдельный сервис)
     try:
         import httpx
         from bs4 import BeautifulSoup
-        resp = httpx.get(url, timeout=5, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"})
-        soup = BeautifulSoup(resp.text, "html.parser")
-        title = soup.find("meta", property="og:title") or soup.find("meta", attrs={"name": "twitter:title"}) or soup.find("title")
-        desc = soup.find("meta", property="og:description") or soup.find("meta", attrs={"name": "twitter:description"}) or soup.find("meta", attrs={"name": "description"})
-        img = soup.find("meta", property="og:image") or soup.find("meta", attrs={"name": "twitter:image"})
-        site = soup.find("meta", property="og:site_name") or soup.find("meta", attrs={"name": "twitter:site"})
-        
-        data = {
-            "title": title.get("content") if title and title.get("content") else (title.text if title else ""),
-            "description": desc.get("content") if desc and desc.get("content") else (desc.get("content") if desc else ""),
-            "image_url": img.get("content") if img and img.get("content") else "",
-            "site_name": site.get("content") if site and site.get("content") else ""
-        }
-        
+        resp = httpx.get(safe_url, timeout=5, follow_redirects=True,
+                         headers={"User-Agent": "Mozilla/5.0"})
+        data = _parse_preview(resp)
         expires = datetime.now(timezone.utc).replace(hour=23, minute=59, second=59)
         if cached:
             cached.title = data["title"]
@@ -1055,11 +1237,29 @@ def get_link_preview(url: str = Query(...), user: User = Depends(get_current_use
             cached.site_name = data["site_name"]
             cached.expires_at = expires
         else:
-            db.add(LinkPreview(url=url, **data, expires_at=expires))
+            db.add(LinkPreview(url=safe_url, **data, expires_at=expires))
         db.commit()
         return data
-    except Exception:
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.warning(f"link preview failed for {safe_url}: {e!r}")
         return {"title": "", "description": "", "image_url": "", "site_name": ""}
+
+
+def _parse_preview(resp):
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(resp.text, "html.parser")
+    title = soup.find("meta", property="og:title") or soup.find("meta", attrs={"name": "twitter:title"}) or soup.find("title")
+    desc = soup.find("meta", property="og:description") or soup.find("meta", attrs={"name": "twitter:description"}) or soup.find("meta", attrs={"name": "description"})
+    img = soup.find("meta", property="og:image") or soup.find("meta", attrs={"name": "twitter:image"})
+    site = soup.find("meta", property="og:site_name") or soup.find("meta", attrs={"name": "twitter:site"})
+    return {
+        "title": title.get("content") if title and title.get("content") else (title.text if title else ""),
+        "description": desc.get("content") if desc and desc.get("content") else (desc.get("content") if desc else ""),
+        "image_url": img.get("content") if img and img.get("content") else "",
+        "site_name": site.get("content") if site and site.get("content") else ""
+    }
 
 # ===== ADMIN ENHANCEMENTS =====
 

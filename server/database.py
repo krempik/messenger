@@ -1,7 +1,7 @@
 import os
 import json
 import logging
-from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, ForeignKey, Boolean, UniqueConstraint, Index, LargeBinary, inspect
+from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, ForeignKey, Boolean, UniqueConstraint, Index, LargeBinary, inspect, event, text
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from datetime import datetime, timezone
 
@@ -13,6 +13,14 @@ SessionLocal = sessionmaker(bind=engine)
 Base = declarative_base()
 
 
+@event.listens_for(engine, "connect")
+def _enable_foreign_keys(dbapi_connection, _record):
+    """SQLite FK constraints are off by default; the schema relies on CASCADE."""
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.close()
+
+
 class User(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True, index=True)
@@ -22,7 +30,6 @@ class User(Base):
     status = Column(String(128), nullable=True, default="")
     password_hash = Column(String(256), nullable=False)
     public_key = Column(Text, nullable=False)
-    private_key_encrypted = Column(Text, nullable=True)  # для мульти-девайс
     avatar_url = Column(String(512), nullable=True)
     last_seen = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
@@ -31,7 +38,7 @@ class User(Base):
     is_shadow_banned = Column(Boolean, default=False)
     vapid_p256dh = Column(String(512), nullable=True)
     vapid_auth = Column(String(512), nullable=True)
-    sent_messages = relationship("Message", back_populates="sender", foreign_keys="Message.sender_id")
+    sent_messages = relationship("Message", back_populates="sender", foreign_keys="Message.sender_id", passive_deletes=True)
 
 
 class Chat(Base):
@@ -60,8 +67,8 @@ class ChatMember(Base):
     role = Column(String(32), default="member")
     last_read_id = Column(Integer, default=0)
     joined_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    chat = relationship("Chat", back_populates="members")
-    user = relationship("User")
+    chat = relationship("Chat", back_populates="members", passive_deletes=True)
+    user = relationship("User", passive_deletes=True)
 
 
 class Message(Base):
@@ -100,8 +107,8 @@ class Reaction(Base):
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     emoji = Column(String(16), nullable=False)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    message = relationship("Message", backref="reactions")
-    user = relationship("User")
+    message = relationship("Message", backref="reactions", passive_deletes=True)
+    user = relationship("User", passive_deletes=True)
 
 
 class MessageRead(Base):
@@ -111,8 +118,8 @@ class MessageRead(Base):
     message_id = Column(Integer, ForeignKey("messages.id", ondelete="CASCADE"), nullable=False)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     read_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    message = relationship("Message", backref="read_records")
-    user = relationship("User")
+    message = relationship("Message", backref="read_records", passive_deletes=True)
+    user = relationship("User", passive_deletes=True)
 
 
 class GroupKey(Base):
@@ -124,6 +131,7 @@ class GroupKey(Base):
     key_version = Column(Integer, default=1)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     __table_args__ = (UniqueConstraint("chat_id", "user_id", name="uq_group_key"),)
+    user = relationship("User", passive_deletes=True)
 
 
 class PushSubscription(Base):
@@ -135,7 +143,7 @@ class PushSubscription(Base):
     auth = Column(String(512), nullable=False)
     user_agent = Column(String(512), nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    user = relationship("User")
+    user = relationship("User", passive_deletes=True)
 
 
 class Block(Base):
@@ -145,8 +153,8 @@ class Block(Base):
     blocker_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     blocked_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    blocker = relationship("User", foreign_keys=[blocker_id])
-    blocked = relationship("User", foreign_keys=[blocked_id])
+    blocker = relationship("User", foreign_keys=[blocker_id], passive_deletes=True)
+    blocked = relationship("User", foreign_keys=[blocked_id], passive_deletes=True)
 
 
 class ModLog(Base):
@@ -158,7 +166,7 @@ class ModLog(Base):
     target_id = Column(Integer, nullable=False)
     reason = Column(Text, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    admin = relationship("User")
+    admin = relationship("User", passive_deletes=True)
 
 
 class StickerPack(Base):
@@ -216,7 +224,7 @@ def _auto_migrate():
                 sql = f"ALTER TABLE {table_name} ADD COLUMN {col.name} {col_type} {nullable}{default_val}"
                 try:
                     with engine.connect() as conn:
-                        conn.execute(__import__("sqlalchemy").text(sql))
+                        conn.execute(text(sql))
                         conn.commit()
                     migrated.append(f"{table_name}.{col.name}")
                 except Exception as e:
@@ -226,8 +234,11 @@ def _auto_migrate():
         log.info(f"Auto-migrated columns: {', '.join(migrated)}")
 
 
-Base.metadata.create_all(bind=engine)
-_auto_migrate()
+def ensure_schema():
+    """Create schema and apply additive migrations. Call from the app lifespan,
+    never as a module-import side effect."""
+    Base.metadata.create_all(bind=engine)
+    _auto_migrate()
 
 
 def get_db():

@@ -70,7 +70,7 @@
         return getInitials(user?.display_name || user?.name);
     }
     function esc(t) { return (t || "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
-    function escAttr(t) { return (t || "").replace(/"/g, "&quot;"); }
+    function escAttr(t) { return (t || "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
 
     function formatTime(iso) {
         if (!iso) return "";
@@ -830,7 +830,7 @@
             const grouped = {};
             msg.reactions.forEach(r => { grouped[r.emoji] = (grouped[r.emoji] || 0) + 1; });
             reactionsHtml = `<div class="reactions-row">${Object.entries(grouped).map(([e, c]) =>
-                `<span class="reaction-badge" data-emoji="${escAttr(e)}">${e}${c > 1 ? " " + c : ""}</span>`
+                `<span class="reaction-badge" data-emoji="${esc(e)}">${esc(e)}${c > 1 ? " " + c : ""}</span>`
             ).join("")}</div>`;
         }
 

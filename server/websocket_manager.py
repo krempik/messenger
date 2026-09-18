@@ -2,7 +2,9 @@ from fastapi import WebSocket
 from typing import Dict, Set
 import json
 import asyncio
-import time
+import logging
+
+log = logging.getLogger("h4ck.ws")
 
 
 class ConnectionManager:
@@ -22,6 +24,10 @@ class ConnectionManager:
             if not self.active_connections[user_id]:
                 del self.active_connections[user_id]
 
+    def disconnect_user(self, user_id: int):
+        """Drop every socket of a user (used when the account is deleted)."""
+        self.active_connections.pop(user_id, None)
+
     def is_online(self, user_id: int) -> bool:
         return user_id in self.active_connections and len(self.active_connections[user_id]) > 0
 
@@ -35,11 +41,13 @@ class ConnectionManager:
         for ws in self.active_connections[user_id]:
             try:
                 await ws.send_text(json.dumps(data, default=str))
-            except Exception:
+            except Exception as e:
+                log.warning(f"ws send failed to user {user_id}: {e}")
                 dead.add(ws)
-        self.active_connections[user_id] -= dead
-        if not self.active_connections[user_id]:
-            del self.active_connections[user_id]
+        if dead:
+            self.active_connections[user_id] -= dead
+            if not self.active_connections[user_id]:
+                del self.active_connections[user_id]
 
     async def send_to_chat(self, member_ids: list[int], data: dict, exclude_user: int = None):
         for uid in member_ids:
@@ -53,17 +61,18 @@ class ConnectionManager:
     async def _cleanup_stale_connections(self):
         while True:
             await asyncio.sleep(30)
-            now = time.time()
             for user_id, connections in list(self.active_connections.items()):
                 dead = set()
                 for ws in connections:
                     try:
                         await ws.send_text(json.dumps({"type": "ping"}))
-                    except Exception:
+                    except Exception as e:
+                        log.warning(f"stale ws ping failed for user {user_id}: {e}")
                         dead.add(ws)
-                self.active_connections[user_id] -= dead
-                if not self.active_connections[user_id]:
-                    del self.active_connections[user_id]
+                if dead:
+                    self.active_connections[user_id] -= dead
+                    if not self.active_connections[user_id]:
+                        del self.active_connections[user_id]
 
 
 manager = ConnectionManager()
