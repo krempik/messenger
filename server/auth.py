@@ -2,6 +2,7 @@ import os
 import base64
 import logging
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Optional
 
 from fastapi import Depends, HTTPException
@@ -44,23 +45,50 @@ SECRET_KEY = _load_or_create_secret()
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_HOURS = 24
 
-# VAPID keys for Web Push
-VAPID_PRIVATE_KEY = os.environ.get("VAPID_PRIVATE_KEY")
-VAPID_PUBLIC_KEY = os.environ.get("VAPID_PUBLIC_KEY")
+# VAPID keys for Web Push. Single source of truth: either both env vars, or a
+# persisted keypair on disk — never re-generated per process, or every
+# subscription would die on restart.
+_VAPID_PRIVATE_FILE = os.path.join(os.path.dirname(__file__), ".vapid_private")
+_VAPID_PUBLIC_FILE = os.path.join(os.path.dirname(__file__), ".vapid_public")
 
-if not VAPID_PRIVATE_KEY or not VAPID_PUBLIC_KEY:
-    log.warning("VAPID env vars not set; generating ephemeral keys (push subs will break on restart)")
+
+def _generate_vapid_keys():
     private_key = ec.generate_private_key(ec.SECP256R1())
     public_key = private_key.public_key()
-    VAPID_PRIVATE_KEY = base64.urlsafe_b64encode(
+    private_b64 = base64.urlsafe_b64encode(
         private_key.private_numbers().private_value.to_bytes(32, 'big')
     ).decode().rstrip('=')
-    VAPID_PUBLIC_KEY = base64.urlsafe_b64encode(
+    public_b64 = base64.urlsafe_b64encode(
         public_key.public_bytes(
             encoding=serialization.Encoding.X962,
             format=serialization.PublicFormat.UncompressedPoint
         )
     ).decode().rstrip('=')
+    return private_b64, public_b64
+
+
+def _load_or_create_vapid() -> tuple[str, str]:
+    env_private = os.environ.get("VAPID_PRIVATE_KEY")
+    env_public = os.environ.get("VAPID_PUBLIC_KEY")
+    if env_private and env_public:
+        return env_private, env_public
+    try:
+        if os.path.isfile(_VAPID_PRIVATE_FILE) and os.path.isfile(_VAPID_PUBLIC_FILE):
+            private_val = Path(_VAPID_PRIVATE_FILE).read_text(encoding="utf-8").strip()
+            public_val = Path(_VAPID_PUBLIC_FILE).read_text(encoding="utf-8").strip()
+            if private_val and public_val:
+                return private_val, public_val
+        private_b64, public_b64 = _generate_vapid_keys()
+        Path(_VAPID_PRIVATE_FILE).write_text(private_b64, encoding="utf-8")
+        Path(_VAPID_PUBLIC_FILE).write_text(public_b64, encoding="utf-8")
+        log.info("generated and persisted new VAPID keypair")
+        return private_b64, public_b64
+    except Exception as exc:
+        log.error("could not persist VAPID keys (%s); using ephemeral pair", exc)
+        return _generate_vapid_keys()
+
+
+VAPID_PRIVATE_KEY, VAPID_PUBLIC_KEY = _load_or_create_vapid()
 
 # Use pbkdf2_sha256 instead of bcrypt to avoid passlib bcrypt bug
 pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")

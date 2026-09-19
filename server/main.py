@@ -9,6 +9,7 @@ import subprocess
 import threading
 import time
 import asyncio
+import concurrent.futures
 from typing import Optional
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
@@ -220,6 +221,12 @@ async def lifespan(app: FastAPI):
     global _loop
     _loop = asyncio.get_running_loop()
     ensure_schema()
+    # Prune expired disappearing messages and stale link previews on boot.
+    boot_db = SessionLocal()
+    try:
+        _purge_expired_messages(boot_db)
+    finally:
+        boot_db.close()
     _start_tunnel()
     # Start WebSocket cleanup task
     manager._cleanup_task = asyncio.create_task(manager._cleanup_stale_connections())
@@ -589,6 +596,12 @@ def get_messages(chat_id: int, before_id: Optional[int] = None, limit: int = 50,
     if not db.query(ChatMember).filter(ChatMember.chat_id == chat_id, ChatMember.user_id == user.id).first():
         raise HTTPException(403, "Not a member")
     q = db.query(Message).filter(Message.chat_id == chat_id)
+    # Hide messages from users the viewer blocked or who blocked the viewer.
+    hidden_ids = set()
+    for row in db.query(Block).filter((Block.blocker_id == user.id) | (Block.blocked_id == user.id)).all():
+        hidden_ids.add(row.blocked_id if row.blocker_id == user.id else row.blocker_id)
+    if hidden_ids:
+        q = q.filter(~Message.sender_id.in_(hidden_ids))
     if before_id: q = q.filter(Message.id < before_id)
     msgs = q.order_by(Message.created_at.desc()).limit(limit).all()
     msgs.reverse()
@@ -831,16 +844,32 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                 if t == "message":
                     chat_id = data.get("chat_id")
                     content = str(data.get("content") or "")[:10000]
-                    if not db.query(ChatMember).filter(ChatMember.chat_id == chat_id, ChatMember.user_id == user.id).first():
+                    chat = db.query(Chat).filter(Chat.id == chat_id).first()
+                    members = db.query(ChatMember).filter(ChatMember.chat_id == chat_id).all()
+                    if not chat or not any(m.user_id == user.id for m in members):
                         await websocket.send_text(json.dumps({"type": "error", "detail": "Not a member"})); continue
+                    # Server-side block enforcement: in a 1:1 chat, sending is
+                    # refused when the recipient has blocked the sender.
+                    if not chat.is_group:
+                        blocked_by = db.query(Block.id).filter(
+                            Block.blocker_id.in_([m.user_id for m in members]),
+                            Block.blocked_id == user.id,
+                        ).first()
+                        if blocked_by:
+                            await websocket.send_text(json.dumps({"type": "error", "detail": "Blocked by recipient"})); continue
                     msg = Message(chat_id=chat_id, sender_id=user.id, content=content,
                         encrypted_key=str(data.get("encrypted_key") or None), sender_encrypted_key=str(data.get("sender_encrypted_key") or None),
                         message_type=str(data.get("message_type") or "text")[:32], file_url=str(data.get("file_url") or None),
-                        file_name=str(data.get("file_name") or None)[:256], reply_to_id=data.get("reply_to_id"))
+                        file_name=str(data.get("file_name") or None)[:256], reply_to_id=data.get("reply_to_id"),
+                        expires_at=datetime.now(timezone.utc) + timedelta(seconds=chat.disappearing_timer) if chat.disappearing_timer else None)
                     db.add(msg); db.commit(); db.refresh(msg)
-                    members = db.query(ChatMember).filter(ChatMember.chat_id == chat_id).all()
                     await manager.send_to_chat([m.user_id for m in members],
                         {"type": "message", "message": message_dict(msg, db, hide_shadowed=True)})
+                    _purge_expired_messages(db)
+                    if not chat.is_group and len(members) == 2:
+                        partner_id = next((m.user_id for m in members if m.user_id != user.id), None)
+                        if partner_id:
+                            push_notify_user(db, partner_id, user.display_name, "📩 Новое сообщение")
                 elif t == "typing":
                     chat_id = data.get("chat_id")
                     if not db.query(ChatMember).filter(ChatMember.chat_id == chat_id, ChatMember.user_id == user.id).first():
@@ -1017,6 +1046,78 @@ def push_unsubscribe(req: PushSubscriptionRequest, user: User = Depends(get_curr
 @app.get("/api/push/vapid-public-key")
 def get_vapid_public_key():
     return {"public_key": get_vapid_keys()["public_key"]}
+
+
+def _purge_expired_messages(db: Session) -> None:
+    """Delete messages past their disappearing_timer, nulling any pinned pointer."""
+    now = datetime.now(timezone.utc)
+    expired = db.query(Message).filter(Message.expires_at.isnot(None), Message.expires_at < now).all()
+    if not expired:
+        return
+    ids = [m.id for m in expired]
+    db.query(Chat).filter(Chat.pinned_message_id.in_(ids)).update({Chat.pinned_message_id: None}, synchronize_session=False)
+    db.query(Message).filter(Message.id.in_(ids)).delete(synchronize_session=False)
+    db.commit()
+    log.info("purged %d expired disappearing messages", len(ids))
+
+
+def _send_push_to_sub(sub, private_key: str, payload: str) -> str:
+    from pywebpush import webpush, WebPushException
+    try:
+        webpush(
+            subscription_info={"endpoint": sub.endpoint, "keys": {"p256dh": sub.p256dh, "auth": sub.auth}},
+            data=payload,
+            vapid_private_key=private_key,
+            vapid_claims={"sub": "mailto:admin@4ayka.studio"},
+            ttl=120,
+        )
+        return "ok"
+    except WebPushException as exc:
+        if exc.response is not None and exc.response.status_code in (404, 410):
+            return "gone"
+        log.warning("webpush to %s failed: %s", sub.endpoint, exc)
+        return "error"
+    except Exception as exc:
+        log.warning("webpush to %s failed: %s", sub.endpoint, exc)
+        return "error"
+
+
+def _process_push(sub_id: int, private_key: str, payload: str) -> None:
+    db = SessionLocal()
+    try:
+        sub = db.query(PushSubscription).filter(PushSubscription.id == sub_id).first()
+        if not sub:
+            return
+        result = _send_push_to_sub(sub, private_key, payload)
+        if result == "gone":
+            db.delete(sub)
+            db.commit()
+            log.info("removed stale push subscription %s", sub_id)
+    except Exception as exc:
+        log.warning("push processing for sub %s failed: %s", sub_id, exc)
+    finally:
+        db.close()
+
+
+_push_executor: Optional[concurrent.futures.ThreadPoolExecutor] = None
+
+
+def push_notify_user(db: Session, recipient_id: int, title: str, body: str) -> None:
+    """Fire-and-forget web push to every live subscription of a user.
+
+    Runs in background threads so a slow push service never blocks the WS
+    loop; every failure path is logged. Stale (404/410) subs are pruned.
+    """
+    subs = db.query(PushSubscription).filter(PushSubscription.user_id == recipient_id).all()
+    if not subs:
+        return
+    global _push_executor
+    if _push_executor is None:
+        _push_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+    payload = json.dumps({"title": title, "body": body, "icon": "/icon-192.png", "badge": "/icon-192.png"})
+    keys = get_vapid_keys()
+    for sub in subs:
+        _push_executor.submit(_process_push, sub.id, keys["private_key"], payload)
 
 # ===== BLOCKING =====
 
@@ -1461,5 +1562,5 @@ app.mount("/static", StaticFiles(directory=CLIENT_DIR), name="static")
 @app.get("/", response_class=HTMLResponse)
 async def root():
     html = (Path(CLIENT_DIR) / "index.html").read_text(encoding="utf-8")
-    html = html.replace('v2.2', f'v{get_version()}')
+    html = html.replace("__VERSION__", f"v{get_version()}")
     return HTMLResponse(html)

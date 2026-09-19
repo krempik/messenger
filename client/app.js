@@ -316,7 +316,7 @@
             const info = await api("/api/host-info");
             const url = info.tunnel_url || "Не настроен";
             c.innerHTML = `
-                <div class="form-group"><label>Ссылка</label><div style="color:var(--accent);word-break:break-all;cursor:pointer" onclick="navigator.clipboard.writeText('${esc(url)}');alert('Скопировано!')">${esc(url)}</div></div>
+                <div class="form-group"><label>Ссылка</label><div class="host-url-copy" style="color:var(--accent);word-break:break-all;cursor:pointer">${esc(url)}</div></div>
                 <div class="form-group"><label>Тип</label><div>${info.permanent ? "Постоянный" : "Временный"}</div></div>
                 <div class="form-group"><label>Работает</label><div>${formatUptime(info.uptime_seconds)}</div></div>
                 <div class="form-group"><label>Онлайн</label><div>${info.online_users} чел.</div></div>
@@ -355,7 +355,7 @@
                                 <span>${esc(u.display_name)}</span>
                                 <span>${esc(u.bio || "-")}</span>
                                 <span>${u.created_at ? new Date(u.created_at).toLocaleString() : "-"}</span>
-                                <span><button class="btn-text" onclick="adminDeleteUser(${u.id})">&#128465;</button></span>
+                                <span><button class="btn-text" data-admin-action="user" data-id="${u.id}">&#128465;</button></span>
                             </div>
                         `).join("")}
                     </div>
@@ -371,7 +371,7 @@
                                 <span>${c.is_group ? "Группа" : "ЛС"}</span>
                                 <span>${c.member_count}</span>
                                 <span>${c.created_at ? new Date(c.created_at).toLocaleString() : "-"}</span>
-                                <span><button class="btn-text" onclick="adminDeleteChat(${c.id})">&#128465;</button></span>
+                                <span><button class="btn-text" data-admin-action="chat" data-id="${c.id}">&#128465;</button></span>
                             </div>
                         `).join("")}
                     </div>
@@ -439,8 +439,8 @@
                     <div><div class="member-name">${esc(m.display_name)} ${isOwner ? '<span class="role-badge owner">Владелец</span>' : isAdmin ? '<span class="role-badge admin">Админ</span>' : ''}</div></div>
                 </div>
                 <div class="member-actions">
-                    ${myRole === "owner" && !isOwner ? `<button class="btn-text" onclick="promoteMember(${m.id}, '${m.role === 'admin' ? 'member' : 'admin'}')">${m.role === 'admin' ? 'Понизить' : 'Повысить'}</button>` : ''}
-                    ${myRole === "owner" && !isOwner ? `<button class="btn-text" style="color:var(--danger)" onclick="kickMember(${m.id})">Удалить</button>` : ''}
+                    ${myRole === "owner" && !isOwner ? `<button class="btn-text" data-member-action="promote" data-member-id="${m.id}" data-member-role="${m.role}">${m.role === 'admin' ? 'Понизить' : 'Повысить'}</button>` : ''}
+                    ${myRole === "owner" && !isOwner ? `<button class="btn-text" style="color:var(--danger)" data-member-action="kick" data-member-id="${m.id}">Удалить</button>` : ''}
                 </div>`;
             list.appendChild(item);
         }
@@ -461,6 +461,24 @@
         if (!confirm("Удалить чат?")) return;
         try { await api(`/api/admin/chats/${chatId}`, { method: "DELETE" }); toast("Чат удалён", "success"); $("#admin-btn").click(); } catch { toast("Ошибка", "error"); }
     };
+
+    // Delegated actions for rendered admin/member/host rows (no inline onclick).
+    $("#host-info-content").addEventListener("click", async (e) => {
+        const t = e.target.closest(".host-url-copy"); if (!t) return;
+        try { await navigator.clipboard.writeText(t.textContent.trim()); toast("Скопировано!", "success"); }
+        catch { toast("Не удалось скопировать", "error"); }
+    });
+    $("#admin-content").addEventListener("click", (e) => {
+        const btn = e.target.closest("[data-admin-action]"); if (!btn) return;
+        if (btn.dataset.adminAction === "user") { window.adminDeleteUser(Number(btn.dataset.id)); }
+        else if (btn.dataset.adminAction === "chat") { window.adminDeleteChat(Number(btn.dataset.id)); }
+    });
+    $("#members-list").addEventListener("click", (e) => {
+        const btn = e.target.closest("[data-member-action]"); if (!btn) return;
+        const id = Number(btn.dataset.memberId);
+        if (btn.dataset.memberAction === "kick") { window.kickMember(id); }
+        else if (btn.dataset.memberAction === "promote") { window.promoteMember(id, btn.dataset.memberRole === "admin" ? "member" : "admin"); }
+    });
 
     // Chat theme
     function applyChatTheme(color) {

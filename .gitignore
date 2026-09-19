@@ -12,6 +12,8 @@ tunnel.json
 .vscode/
 .env
 .secret_key
+.vapid_private
+.vapid_public
 .DS_Store
 Thumbs.db
 *.egg-info/
