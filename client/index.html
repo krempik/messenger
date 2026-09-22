@@ -6,7 +6,7 @@
     <meta name="theme-color" content="#0a0a0f">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-    <meta name="description" content="E2E Р·Р°С‰РёС‰С‘РЅРЅС‹Р№ РјРµСЃСЃРµРЅРґР¶РµСЂ by 4ayka Studio">
+    <meta name="description" content="E2E защищённый мессенджер by 4ayka Studio">
     <title>Frendo</title>
     <link rel="manifest" href="/static/manifest.json">
     <link rel="stylesheet" href="/static/style.css">
@@ -15,7 +15,7 @@
 </head>
 <body>
 <div id="toast-container"></div>
-<div id="connection-banner" class="connection-banner hidden"><span>&#9888; РџРµСЂРµРїРѕРґРєР»СЋС‡РµРЅРёРµ...</span></div>
+<div id="connection-banner" class="connection-banner hidden"><span>&#9888; Переподключение...</span></div>
 
 <div id="auth-screen">
     <div class="auth-container">
@@ -24,33 +24,33 @@
             <h1>Frendo</h1>
 <div class="version-static">v__VERSION__</div>
             <div class="subtitle">4ayka Studio</div>
-            <p>E2E Р·Р°С‰РёС‰С‘РЅРЅС‹Р№ РјРµСЃСЃРµРЅРґР¶РµСЂ</p>
+            <p>E2E защищённый мессенджер</p>
         </div>
         <div class="auth-tabs">
-            <button class="auth-tab active" data-tab="login">Р’С…РѕРґ</button>
-            <button class="auth-tab" data-tab="register">Р РµРіРёСЃС‚СЂР°С†РёСЏ</button>
+            <button class="auth-tab active" data-tab="login">Вход</button>
+            <button class="auth-tab" data-tab="register">Регистрация</button>
         </div>
         <div class="server-url-section">
-            <button type="button" id="server-toggle-btn" class="server-toggle-btn">&#9881; РЎРµСЂРІРµСЂ</button>
+            <button type="button" id="server-toggle-btn" class="server-toggle-btn">&#9881; Сервер</button>
             <div id="server-settings-panel" class="server-settings-panel">
                 <div class="form-group">
-                    <label>URL СЃРµСЂРІРµСЂР° <span style="color:var(--text-muted);font-size:11px">(РїСѓСЃС‚Рѕ = Р»РѕРєР°Р»СЊРЅС‹Р№)</span></label>
+                    <label>URL сервера <span style="color:var(--text-muted);font-size:11px">(пусто = локальный)</span></label>
                     <input type="url" id="server-url-input" placeholder="https://your-tunnel.trycloudflare.com">
                 </div>
             </div>
         </div>
         <form id="login-form" class="auth-form active">
-            <div class="form-group"><label>РРјСЏ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ</label><input type="text" id="login-username" placeholder="username" autocomplete="username" required></div>
-            <div class="form-group"><label>РџР°СЂРѕР»СЊ</label><input type="password" id="login-password" placeholder="&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;" autocomplete="current-password" required></div>
+            <div class="form-group"><label>Имя пользователя</label><input type="text" id="login-username" placeholder="username" autocomplete="username" required></div>
+            <div class="form-group"><label>Пароль</label><input type="password" id="login-password" placeholder="&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;" autocomplete="current-password" required></div>
             <div class="auth-error" id="login-error"></div>
-            <button type="submit" class="btn-primary">Р’РѕР№С‚Рё</button>
+            <button type="submit" class="btn-primary">Войти</button>
         </form>
         <form id="register-form" class="auth-form">
-            <div class="form-group"><label>РРјСЏ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ</label><input type="text" id="reg-username" placeholder="username" autocomplete="username" required pattern="[a-zA-Z0-9_]{3,32}"></div>
-            <div class="form-group"><label>РћС‚РѕР±СЂР°Р¶Р°РµРјРѕРµ РёРјСЏ</label><input type="text" id="reg-displayname" placeholder="Р’Р°С€Рµ РёРјСЏ" required maxlength="128"></div>
-            <div class="form-group"><label>РџР°СЂРѕР»СЊ</label><input type="password" id="reg-password" placeholder="РњРёРЅРёРјСѓРј 6 СЃРёРјРІРѕР»РѕРІ" autocomplete="new-password" required minlength="6"></div>
+            <div class="form-group"><label>Имя пользователя</label><input type="text" id="reg-username" placeholder="username" autocomplete="username" required pattern="[a-zA-Z0-9_]{3,32}"></div>
+            <div class="form-group"><label>Отображаемое имя</label><input type="text" id="reg-displayname" placeholder="Ваше имя" required maxlength="128"></div>
+            <div class="form-group"><label>Пароль</label><input type="password" id="reg-password" placeholder="Минимум 6 символов" autocomplete="new-password" required minlength="6"></div>
             <div class="auth-error" id="reg-error"></div>
-            <button type="submit" class="btn-primary">РЎРѕР·РґР°С‚СЊ Р°РєРєР°СѓРЅС‚</button>
+            <button type="submit" class="btn-primary">Создать аккаунт</button>
         </form>
         <a class="studio-link" href="https://krempik.github.io/4ayka-studio/index.html" target="_blank">4ayka Studio</a>
     </div>
@@ -61,9 +61,9 @@
         <div class="sidebar-header">
             <div class="sidebar-top">
                 <div class="sidebar-brand"><h2>Frendo</h2><div class="version-static">v__VERSION__</div></div>
-                <div class="sidebar-actions"><button class="icon-btn" id="new-chat-btn" title="РќРѕРІС‹Р№ С‡Р°С‚">&#9998;</button></div>
+                <div class="sidebar-actions"><button class="icon-btn" id="new-chat-btn" title="Новый чат">&#9998;</button></div>
             </div>
-            <div class="search-box"><span class="search-icon">&#128269;</span><input type="text" id="search-input" placeholder="РџРѕРёСЃРє С‡Р°С‚РѕРІ..."></div>
+            <div class="search-box"><span class="search-icon">&#128269;</span><input type="text" id="search-input" placeholder="Поиск чатов..."></div>
         </div>
         <div class="chat-list" id="chat-list"></div>
         <div class="sidebar-footer">
@@ -72,12 +72,12 @@
                 <div class="avatar-edit-overlay" id="avatar-edit-btn">&#128247;</div>
                 <input type="file" id="avatar-input" accept="image/*" style="display:none">
             </div>
-            <div class="user-info"><div class="user-name" id="my-name">User</div><div class="user-status">&#9679; Р’ СЃРµС‚Рё</div></div>
-            <button class="icon-btn" id="host-info-btn" title="РЎРµСЂРІРµСЂ">&#9741;</button>
-            <button class="icon-btn" id="profile-btn" title="РџСЂРѕС„РёР»СЊ">&#128100;</button>
-            <button class="icon-btn" id="theme-toggle-btn" title="РўРµРјР°">&#9788;</button>
-            <button class="icon-btn hidden" id="admin-btn" title="РђРґРјРёРЅ-РїР°РЅРµР»СЊ">&#9881;</button>
-            <button class="btn-logout" id="logout-btn" title="Р’С‹Р№С‚Рё">&#9211;</button>
+            <div class="user-info"><div class="user-name" id="my-name">User</div><div class="user-status">&#9679; Р’ сети</div></div>
+            <button class="icon-btn" id="host-info-btn" title="Сервер">&#9741;</button>
+            <button class="icon-btn" id="profile-btn" title="Профиль">&#128100;</button>
+            <button class="icon-btn" id="theme-toggle-btn" title="Тема">&#9788;</button>
+            <button class="icon-btn hidden" id="admin-btn" title="Админ-панель">&#9881;</button>
+            <button class="btn-logout" id="logout-btn" title="Выйти">&#9211;</button>
         </div>
     </div>
 
@@ -86,7 +86,7 @@
             <div class="shield">&#128128;</div>
             <h3>Frendo</h3>
             <div class="sub">4ayka Studio</div>
-            <p>Р’С‹Р±РµСЂРёС‚Рµ С‡Р°С‚ РёР»Рё РЅР°С‡РЅРёС‚Рµ РЅРѕРІС‹Р№</p>
+            <p>Выберите чат или начните новый</p>
         </div>
         <div class="chat-view hidden" id="chat-view">
             <div class="chat-header">
@@ -99,11 +99,11 @@
                     </div>
                 </div>
                 <div class="encryption-badge" id="encryption-badge">&#128274; E2E</div>
-                <button class="icon-btn" id="search-chat-btn" title="РџРѕРёСЃРє">&#128269;</button>
-                <button class="icon-btn" id="chat-menu-btn" title="РќР°СЃС‚СЂРѕР№РєРё">&#8942;</button>
+                <button class="icon-btn" id="search-chat-btn" title="Поиск">&#128269;</button>
+                <button class="icon-btn" id="chat-menu-btn" title="Настройки">&#8942;</button>
             </div>
             <div class="chat-search-bar hidden" id="chat-search-bar">
-                <input type="text" id="chat-search-input" placeholder="РџРѕРёСЃРє РІ С‡Р°С‚Рµ...">
+                <input type="text" id="chat-search-input" placeholder="Поиск в чате...">
                 <button class="icon-btn" id="chat-search-close">&times;</button>
             </div>
             <div class="messages-container" id="messages-container"></div>
@@ -123,7 +123,7 @@
                 <div class="edit-preview-content">
                     <span class="edit-preview-label">&#9998;</span>
                     <div class="edit-preview-texts">
-                        <span class="edit-preview-title">Р РµРґР°РєС‚РёСЂРѕРІР°РЅРёРµ</span>
+                        <span class="edit-preview-title">Редактирование</span>
                         <span class="edit-preview-text" id="edit-preview-text"></span>
                     </div>
                 </div>
@@ -131,13 +131,13 @@
             </div>
             <div class="input-area">
                 <div class="input-wrapper">
-                    <button class="icon-btn" id="attach-btn" title="Р¤Р°Р№Р»">&#128206;</button>
-                    <button class="icon-btn" id="emoji-btn" title="Р­РјРѕРґР·Рё">&#128578;</button>
-                    <button class="icon-btn" id="sticker-btn" title="РЎС‚РёРєРµСЂС‹">&#128172;</button>
+                    <button class="icon-btn" id="attach-btn" title="Файл">&#128206;</button>
+                    <button class="icon-btn" id="emoji-btn" title="Эмодзи">&#128578;</button>
+                    <button class="icon-btn" id="sticker-btn" title="Стикеры">&#128172;</button>
                     <button class="icon-btn" id="gif-btn" title="GIF">&#127916;</button>
                     <input type="file" id="file-input" style="display:none">
-                    <textarea id="message-input" rows="1" placeholder="РЎРѕРѕР±С‰РµРЅРёРµ..."></textarea>
-                    <button id="send-btn" title="РћС‚РїСЂР°РІРёС‚СЊ">&#9654;</button>
+                    <textarea id="message-input" rows="1" placeholder="Сообщение..."></textarea>
+                    <button id="send-btn" title="Отправить">&#9654;</button>
                 </div>
             </div>
         </div>
@@ -146,34 +146,34 @@
 
 <div class="modal-overlay hidden" id="modal-overlay">
     <div class="modal hidden" id="modal-new-chat">
-        <div class="modal-header"><h3>РќРѕРІС‹Р№ С‡Р°С‚</h3><button class="modal-close" data-close-modal>&times;</button></div>
+        <div class="modal-header"><h3>Новый чат</h3><button class="modal-close" data-close-modal>&times;</button></div>
         <div class="modal-body">
             <div class="toggle-row">
-                <label for="group-toggle-cb">Р“СЂСѓРїРїРѕРІРѕР№ С‡Р°С‚</label>
+                <label for="group-toggle-cb">Групповой чат</label>
                 <label class="toggle-switch"><input type="checkbox" id="group-toggle-cb"><span class="toggle-slider"></span></label>
             </div>
-            <div class="form-group hidden" id="group-name-group"><input type="text" id="group-name-input" placeholder="РќР°Р·РІР°РЅРёРµ РіСЂСѓРїРїС‹"></div>
+            <div class="form-group hidden" id="group-name-group"><input type="text" id="group-name-input" placeholder="Название группы"></div>
             <div class="user-list" id="user-list"></div>
         </div>
-        <div class="modal-footer"><button class="btn-cancel" data-close-modal>РћС‚РјРµРЅР°</button><button class="btn-primary" id="modal-create">РЎРѕР·РґР°С‚СЊ</button></div>
+        <div class="modal-footer"><button class="btn-cancel" data-close-modal>Отмена</button><button class="btn-primary" id="modal-create">Создать</button></div>
     </div>
     <div class="modal hidden" id="modal-profile">
-        <div class="modal-header"><h3>РџСЂРѕС„РёР»СЊ</h3><button class="modal-close" data-close-modal>&times;</button></div>
+        <div class="modal-header"><h3>Профиль</h3><button class="modal-close" data-close-modal>&times;</button></div>
         <div class="modal-body">
             <div class="profile-avatar-section">
                 <div class="chat-avatar lg" id="profile-modal-avatar">?</div>
-                <button type="button" id="profile-avatar-upload-btn" class="btn-text">РЎРјРµРЅРёС‚СЊ Р°РІР°С‚Р°СЂ</button>
+                <button type="button" id="profile-avatar-upload-btn" class="btn-text">Сменить аватар</button>
                 <input type="file" id="profile-avatar-file-input" accept="image/*" style="display:none">
             </div>
-            <div class="form-group"><label>РРјСЏ</label><input type="text" id="profile-displayname" maxlength="128"></div>
-            <div class="form-group"><label>Рћ СЃРµР±Рµ</label><textarea id="profile-bio" rows="3" maxlength="512" placeholder="Р Р°СЃСЃРєР°Р¶РёС‚Рµ Рѕ СЃРµР±Рµ..."></textarea></div>
-            <div class="form-group"><label>РќРѕРІС‹Р№ РїР°СЂРѕР»СЊ <span style="color:var(--text-muted);font-size:11px">(РїСѓСЃС‚Рѕ = РЅРµ РјРµРЅСЏС‚СЊ)</span></label><input type="password" id="profile-password" placeholder="&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;"></div>
+            <div class="form-group"><label>Имя</label><input type="text" id="profile-displayname" maxlength="128"></div>
+            <div class="form-group"><label>Рћ себе</label><textarea id="profile-bio" rows="3" maxlength="512" placeholder="Расскажите о себе..."></textarea></div>
+            <div class="form-group"><label>Новый пароль <span style="color:var(--text-muted);font-size:11px">(пусто = не менять)</span></label><input type="password" id="profile-password" placeholder="&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;"></div>
             <div class="auth-error" id="profile-error"></div>
         </div>
-        <div class="modal-footer"><button class="btn-cancel" data-close-modal>РћС‚РјРµРЅР°</button><button class="btn-primary" id="profile-save">РЎРѕС…СЂР°РЅРёС‚СЊ</button></div>
+        <div class="modal-footer"><button class="btn-cancel" data-close-modal>Отмена</button><button class="btn-primary" id="profile-save">Сохранить</button></div>
     </div>
     <div class="modal hidden" id="modal-user-profile">
-        <div class="modal-header"><h3>РџСЂРѕС„РёР»СЊ</h3><button class="modal-close" data-close-modal>&times;</button></div>
+        <div class="modal-header"><h3>Профиль</h3><button class="modal-close" data-close-modal>&times;</button></div>
         <div class="modal-body">
             <div class="profile-avatar-section"><div class="chat-avatar lg" id="user-profile-avatar">?</div></div>
             <div class="profile-info">
@@ -185,17 +185,17 @@
         </div>
     </div>
     <div class="modal hidden" id="modal-host-info">
-        <div class="modal-header"><h3>&#9741; РЎРµСЂРІРµСЂ</h3><button class="modal-close" data-close-modal>&times;</button></div>
+        <div class="modal-header"><h3>&#9741; Сервер</h3><button class="modal-close" data-close-modal>&times;</button></div>
         <div class="modal-body" id="host-info-content"><div class="spinner"></div></div>
-        <div class="modal-footer"><button class="btn-cancel" data-close-modal>Р—Р°РєСЂС‹С‚СЊ</button></div>
+        <div class="modal-footer"><button class="btn-cancel" data-close-modal>Закрыть</button></div>
     </div>
     <div class="modal hidden" id="modal-chat-menu">
-        <div class="modal-header"><h3>РќР°СЃС‚СЂРѕР№РєРё С‡Р°С‚Р°</h3><button class="modal-close" data-close-modal>&times;</button></div>
+        <div class="modal-header"><h3>Настройки чата</h3><button class="modal-close" data-close-modal>&times;</button></div>
         <div class="modal-body">
-            <div class="form-group hidden" id="chat-avatar-group"><label>РђРІР°С‚Р°СЂ РіСЂСѓРїРїС‹</label><button type="button" id="chat-avatar-upload-btn" class="btn-text">РЎРјРµРЅРёС‚СЊ Р°РІР°С‚Р°СЂ</button><input type="file" id="chat-avatar-file-input" accept="image/*" style="display:none"></div>
-            <div class="form-group hidden" id="chat-rename-group"><label>РќР°Р·РІР°РЅРёРµ</label><input type="text" id="chat-rename-input" maxlength="128"><button class="btn-primary" id="chat-rename-btn">РЎРѕС…СЂР°РЅРёС‚СЊ</button></div>
+            <div class="form-group hidden" id="chat-avatar-group"><label>Аватар группы</label><button type="button" id="chat-avatar-upload-btn" class="btn-text">Сменить аватар</button><input type="file" id="chat-avatar-file-input" accept="image/*" style="display:none"></div>
+            <div class="form-group hidden" id="chat-rename-group"><label>Название</label><input type="text" id="chat-rename-input" maxlength="128"><button class="btn-primary" id="chat-rename-btn">Сохранить</button></div>
             <div class="form-group hidden" id="chat-theme-group">
-                <label>Р¦РІРµС‚ С‡Р°С‚Р°</label>
+                <label>Цвет чата</label>
                 <div class="theme-colors" id="theme-colors">
                     <button class="theme-color-btn" data-color="" style="background:var(--accent)">&#10005;</button>
                     <button class="theme-color-btn" data-color="#6c5ce7" style="background:#6c5ce7"></button>
@@ -209,53 +209,53 @@
                 </div>
             </div>
             <div class="form-group hidden" id="chat-members-group">
-                <label>РЈС‡Р°СЃС‚РЅРёРєРё</label>
+                <label>Участники</label>
                 <div class="members-list" id="members-list"></div>
-                <button class="btn-text" id="add-member-btn">+ Р”РѕР±Р°РІРёС‚СЊ СѓС‡Р°СЃС‚РЅРёРєР°</button>
+                <button class="btn-text" id="add-member-btn">+ Добавить участника</button>
             </div>
-            <button class="btn-danger hidden" id="chat-leave-btn">РџРѕРєРёРЅСѓС‚СЊ С‡Р°С‚</button>
-            <button class="btn-danger" id="chat-delete-btn">РЈРґР°Р»РёС‚СЊ С‡Р°С‚</button>
+            <button class="btn-danger hidden" id="chat-leave-btn">Покинуть чат</button>
+            <button class="btn-danger" id="chat-delete-btn">Удалить чат</button>
         </div>
     </div>
     <div class="modal-lightbox hidden" id="modal-lightbox"><button class="lightbox-close" id="lightbox-close">&times;</button><img id="lightbox-img" src="" alt=""></div>
     <div class="modal hidden" id="modal-forward">
-        <div class="modal-header"><h3>&#128228; РџРµСЂРµСЃР»Р°С‚СЊ</h3><button class="modal-close" data-close-modal>&times;</button></div>
+        <div class="modal-header"><h3>&#128228; Переслать</h3><button class="modal-close" data-close-modal>&times;</button></div>
         <div class="modal-body"><div class="forward-chat-list" id="forward-chat-list"></div></div>
     </div>
     <div class="modal hidden" id="modal-admin">
-        <div class="modal-header"><h3>&#9881; РђРґРјРёРЅ-РїР°РЅРµР»СЊ</h3><button class="modal-close" data-close-modal>&times;</button></div>
+        <div class="modal-header"><h3>&#9881; Админ-панель</h3><button class="modal-close" data-close-modal>&times;</button></div>
         <div class="modal-body" id="admin-content"><div class="spinner"></div></div>
-        <div class="modal-footer"><button class="btn-cancel" data-close-modal>Р—Р°РєСЂС‹С‚СЊ</button></div>
+        <div class="modal-footer"><button class="btn-cancel" data-close-modal>Закрыть</button></div>
     </div>
 </div>
 
 <div class="emoji-picker hidden" id="emoji-picker">
     <div class="emoji-picker-header">
-        <input type="text" id="emoji-search" placeholder="РџРѕРёСЃРє СЌРјРѕРґР·Рё...">
+        <input type="text" id="emoji-search" placeholder="Поиск эмодзи...">
     </div>
     <div class="emoji-picker-body" id="emoji-picker-body"></div>
 </div>
 
 <div class="gif-picker hidden" id="gif-picker">
     <div class="gif-picker-header">
-        <input type="text" id="gif-search" placeholder="РџРѕРёСЃРє GIF...">
+        <input type="text" id="gif-search" placeholder="Поиск GIF...">
         <button class="icon-btn" id="gif-close">&times;</button>
     </div>
     <div class="gif-picker-body" id="gif-picker-body"></div>
 </div>
 
 <div class="sticker-picker hidden" id="sticker-picker">
-    <div class="sticker-picker-header"><span>РЎС‚РёРєРµСЂС‹</span><button class="icon-btn" id="sticker-close">&times;</button></div>
+    <div class="sticker-picker-header"><span>Стикеры</span><button class="icon-btn" id="sticker-close">&times;</button></div>
     <div class="sticker-picker-body" id="sticker-picker-body"></div>
 </div>
 
 <div class="context-menu hidden" id="context-menu">
-    <button class="ctx-item" id="ctx-copy">&#128203; РљРѕРїРёСЂРѕРІР°С‚СЊ</button>
-    <button class="ctx-item" id="ctx-reply">&#8617; РћС‚РІРµС‚РёС‚СЊ</button>
-    <button class="ctx-item" id="ctx-react">&#128077; Р РµР°РєС†РёСЏ</button>
-    <button class="ctx-item" id="ctx-forward">&#128228; РџРµСЂРµСЃР»Р°С‚СЊ</button>
-    <button class="ctx-item ctx-own" id="ctx-edit" style="display:none">&#9998; РР·РјРµРЅРёС‚СЊ</button>
-    <button class="ctx-item ctx-danger" id="ctx-delete">&#128465; РЈРґР°Р»РёС‚СЊ</button>
+    <button class="ctx-item" id="ctx-copy">&#128203; Копировать</button>
+    <button class="ctx-item" id="ctx-reply">&#8617; Ответить</button>
+    <button class="ctx-item" id="ctx-react">&#128077; Реакция</button>
+    <button class="ctx-item" id="ctx-forward">&#128228; Переслать</button>
+    <button class="ctx-item ctx-own" id="ctx-edit" style="display:none">&#9998; Изменить</button>
+    <button class="ctx-item ctx-danger" id="ctx-delete">&#128465; Удалить</button>
 </div>
 <div class="reaction-picker hidden" id="reaction-picker">
     <button class="rp-item" data-emoji="&#128077;">&#128077;</button>
