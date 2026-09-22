@@ -4,7 +4,7 @@ import json
 import asyncio
 import logging
 
-log = logging.getLogger("h4ck.ws")
+log = logging.getLogger("frendo.ws")
 
 
 class ConnectionManager:

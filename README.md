@@ -1,4 +1,4 @@
-# H4ck Messenger
+# Frendo
 
 Защищённый мессенджер с E2E шифрованием. RSA-2048 + AES-256-GCM.
 

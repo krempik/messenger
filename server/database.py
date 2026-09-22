@@ -5,7 +5,7 @@ from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, F
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from datetime import datetime, timezone
 
-log = logging.getLogger("h4ck.db")
+log = logging.getLogger("frendo.db")
 
 DB_PATH = os.environ.get("MESSENGER_DB", os.path.join(os.path.dirname(os.path.dirname(__file__)), "messenger.db"))
 engine = create_engine(f"sqlite:///{DB_PATH}", connect_args={"check_same_thread": False}, pool_pre_ping=True)

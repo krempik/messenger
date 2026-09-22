@@ -1,6 +1,6 @@
 @echo off
 echo ============================================
-echo   H4ck - Secure Messenger
+echo   Frendo - Secure Messenger
 echo   4ayka Studio
 echo ============================================
 echo.
@@ -41,7 +41,7 @@ if exist "tunnel.json" (
 )
 
 echo.
-echo [*] Starting H4ck Messenger...
+echo [*] Starting Frendo...
 echo.
 
 python -m uvicorn server.main:app --host 0.0.0.0 --port 8000

@@ -15,7 +15,7 @@ from cryptography.hazmat.primitives import serialization
 
 from .database import get_db, User
 
-log = logging.getLogger("h4ck.auth")
+log = logging.getLogger("frendo.auth")
 
 _SECRET_FILE = os.path.join(os.path.dirname(__file__), ".secret_key")
 
@@ -106,14 +106,14 @@ def verify_password(plain: str, hashed: str) -> bool:
 def create_access_token(user_id: int) -> str:
     expire = datetime.now(timezone.utc) + timedelta(hours=ACCESS_TOKEN_EXPIRE_HOURS)
     return jwt.encode(
-        {"sub": str(user_id), "exp": expire, "iss": "h4ck-messenger"},
+        {"sub": str(user_id), "exp": expire, "iss": "frendo"},
         SECRET_KEY, algorithm=ALGORITHM
     )
 
 
 def decode_token(token: str) -> Optional[dict]:
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM], options={"require_exp": True}, issuer="h4ck-messenger")
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM], options={"require_exp": True}, issuer="frendo")
         # Refresh tokens must never be used as access tokens.
         if payload.get("type") == "refresh":
             return None
@@ -152,14 +152,14 @@ def authenticate_ws_token(token: str, db: Session) -> Optional[User]:
 def create_refresh_token(user_id: int) -> str:
     expire = datetime.now(timezone.utc) + timedelta(days=30)
     return jwt.encode(
-        {"sub": str(user_id), "exp": expire, "iss": "h4ck-messenger", "type": "refresh"},
+        {"sub": str(user_id), "exp": expire, "iss": "frendo", "type": "refresh"},
         SECRET_KEY, algorithm=ALGORITHM
     )
 
 
 def decode_refresh_token(token: str) -> Optional[dict]:
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM], options={"require_exp": True}, issuer="h4ck-messenger")
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM], options={"require_exp": True}, issuer="frendo")
         if payload.get("type") != "refresh":
             return None
         return payload

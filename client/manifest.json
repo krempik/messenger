@@ -1,6 +1,6 @@
 {
-    "name": "H4ck Messenger",
-    "short_name": "H4ck",
+    "name": "Frendo",
+    "short_name": "Frendo",
     "description": "E2E encrypted messenger by 4ayka Studio",
     "start_url": "/",
     "display": "standalone",

@@ -27,7 +27,7 @@ from .database import get_db, User, Chat, ChatMember, Message, Reaction, Message
 from .auth import hash_password, verify_password, create_access_token, authenticate_ws_token, get_current_user, get_vapid_keys, create_refresh_token, decode_refresh_token
 from .websocket_manager import manager
 
-log = logging.getLogger("h4ck.server")
+log = logging.getLogger("frendo.server")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
 BASE_DIR = Path(__file__).parent.parent
@@ -173,7 +173,7 @@ def _start_tunnel():
     named = _tunnel_config and _tunnel_config.get("tunnel_id")
     try:
         if named:
-            cmd = [cf, "tunnel", "--no-autoupdate", "run", _tunnel_config.get("tunnel_name", "h4ck")]
+            cmd = [cf, "tunnel", "--no-autoupdate", "run", _tunnel_config.get("tunnel_name", "frendo")]
             print(f"[*] Named tunnel '{_tunnel_config.get('tunnel_name')}'...")
         else:
             cmd = [cf, "tunnel", "--url", "http://localhost:8000"]
@@ -230,7 +230,7 @@ async def lifespan(app: FastAPI):
     _start_tunnel()
     # Start WebSocket cleanup task
     manager._cleanup_task = asyncio.create_task(manager._cleanup_stale_connections())
-    print("[*] H4ck Messenger started on http://localhost:8000")
+    print("[*] Frendo started on http://localhost:8000")
     yield
     if manager._cleanup_task:
         manager._cleanup_task.cancel()
@@ -241,7 +241,7 @@ async def lifespan(app: FastAPI):
     _stop_tunnel()
 
 
-app = FastAPI(title="H4ck Messenger", lifespan=lifespan)
+app = FastAPI(title="Frendo", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 
 
@@ -1450,8 +1450,8 @@ def admin_detailed_stats(admin_user: User = Depends(verify_admin), db: Session =
 @app.get("/manifest.json")
 def manifest():
     return {
-        "name": "h4ck Messenger",
-        "short_name": "h4ck",
+        "name": "Frendo",
+        "short_name": "frendo",
         "start_url": "/",
         "display": "standalone",
         "background_color": "#0a0a0f",
@@ -1469,7 +1469,7 @@ def manifest():
 @app.get("/sw.js")
 def service_worker():
     sw_code = '''
-const CACHE_NAME = 'h4ck-v__VERSION__';
+const CACHE_NAME = 'frendo-v__VERSION__';
 const STATIC_ASSETS = ['/', '/static/style.css', '/static/app.js', '/static/crypto.js', '/manifest.json'];
 
 self.addEventListener('install', e => {
@@ -1540,7 +1540,7 @@ async function sendQueuedMessages() {
 
 function openDB() {
     return new Promise((resolve, reject) => {
-        const req = indexedDB.open('h4ck-outbox', 1);
+        const req = indexedDB.open('frendo-outbox', 1);
         req.onupgradeneeded = e => e.target.result.createObjectStore('outbox', {keyPath: 'id', autoIncrement: true});
         req.onsuccess = () => resolve(req.result);
         req.onerror = () => reject(req.error);
